@@ -1,27 +1,33 @@
-// Bundled crest images for the 14 real Ligat ha'Al clubs (see assets/crests/).
-// These are the clubs' actual badges, provided locally for this app's
-// internal-use-only running — not fetched/hosted by the app, and not meant
-// to be redistributed. Keyed by `clubs.short_name`.
+// Bundled crest images for the 14 real Ligat ha'Al clubs. Keyed by
+// `clubs.short_name`.
 //
-// Two of the fourteen were ambiguous to identify from the source filenames
-// (BSA / HBS) — flagged in comments below. Swap the require() paths if
-// they're backwards.
+// This file is intentionally checked into git as an EMPTY stub -- the real
+// crest artwork (assets/crests/) is user-supplied for local/internal-use-only
+// running and is deliberately excluded from the public repo (real clubs'
+// trademarked badges, not cleared for redistribution; see .gitignore and
+// CLAUDE.md's "Visual identity" section). With no entries here,
+// ClubCrest.tsx's fallback (a generated placeholder shield from the club's
+// two colours + initials) renders for every club -- the app builds and runs
+// completely fine without the real images.
+//
+// react-native/Metro requires image `require()` paths to be static and
+// resolvable at bundle time, so this can't dynamically check "does the file
+// exist" -- a require() pointing at a missing file fails the whole bundle,
+// not just that one crest. That's why the real, filled-in version of this
+// file (which does `require('../../assets/crests/xyz.png')` per club, same
+// shape as below) lives ONLY on disk locally, never committed:
+// `git update-index --skip-worktree src/components/club-crest-images.ts`
+// has been run so git treats local edits to this exact file as
+// intentionally untracked (`git status` stays clean even though the local
+// copy differs from what's committed here). If you're setting this up
+// fresh with your own licensed/cleared crest images, drop them in
+// assets/crests/ and fill in the map below locally, e.g.:
+//
+//   MTA: require('../../assets/crests/mta.png'), // Maccabi Tel Aviv
+//
+// (run `git update-index --skip-worktree` on this file again afterwards so
+// your local version doesn't get committed).
 
 import type { ImageSourcePropType } from 'react-native';
 
-export const clubCrestImages: Record<string, ImageSourcePropType> = {
-  MTA: require('../../assets/crests/mta.png'), // Maccabi Tel Aviv
-  MHA: require('../../assets/crests/mha.png'), // Maccabi Haifa
-  MNE: require('../../assets/crests/mne.png'), // Maccabi Netanya
-  MPT: require('../../assets/crests/mpt.png'), // Maccabi Petah Tikva
-  HHA: require('../../assets/crests/hha.png'), // Hapoel Haifa
-  HJR: require('../../assets/crests/hjr.png'), // Hapoel Jerusalem
-  HPT: require('../../assets/crests/hpt.png'), // Hapoel Petah Tikva
-  HTA: require('../../assets/crests/hta.png'), // Hapoel Tel Aviv
-  HRG: require('../../assets/crests/hrg.png'), // Hapoel Ramat Gan
-  BJR: require('../../assets/crests/bjr.png'), // Beitar Jerusalem
-  IKS: require('../../assets/crests/iks.png'), // Ironi Kiryat Shmona
-  ITB: require('../../assets/crests/itb.webp'), // Ironi Tiberias
-  BSA: require('../../assets/crests/bsa.png'), // Ihud Bnei Sakhnin -- unconfirmed, see above
-  HBS: require('../../assets/crests/hbs.png'), // Hapoel Be'er Sheva -- unconfirmed, see above
-};
+export const clubCrestImages: Record<string, ImageSourcePropType> = {};

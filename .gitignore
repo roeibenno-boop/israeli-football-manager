@@ -34,6 +34,16 @@ yarn-error.*
 .env
 .env*.local
 
+# logs / misc build output
+*.log
+build/
+
+# real club crest artwork (assets/crests/) -- user-supplied for local/
+# internal-use-only running, not cleared for public redistribution. Kept on
+# disk, deliberately excluded from git. See src/components/club-crest-images.ts
+# for how the app still builds/runs without it (generated placeholder crests).
+/assets/crests/
+
 # local machine tooling (Node/Git installers, portable Node runtime) — not project source
 /אפליציית כדורגל/
 
