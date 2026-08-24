@@ -1,3 +1,4 @@
+import { router } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, FlatList, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
@@ -116,6 +117,17 @@ export default function SquadScreen() {
     }
   };
 
+  const switchClub = async () => {
+    if (!session) return;
+    // Owner-permitted update (see "profiles are updatable by their owner" in
+    // 0001_init.sql) -- no admin access needed, unlike the one-off fix that
+    // unblocked this account the first time this gap was hit.
+    await supabase.from('profiles').update({ managed_club_id: null }).eq('id', session.user.id);
+    router.replace('/pick-club');
+  };
+
+  const signOut = () => supabase.auth.signOut();
+
   return (
     <View style={styles.container}>
       <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -142,6 +154,16 @@ export default function SquadScreen() {
             <StatBar label="Attack" value={clubRating.attack} color="#F2544C" />
             <StatBar label="Midfield" value={clubRating.midfield} color="#3ECF6B" />
             <StatBar label="Defence" value={clubRating.defence} color="#4C8DF2" />
+          </View>
+
+          <View style={styles.headerActions}>
+            <PressableScale onPress={switchClub}>
+              <Text style={styles.headerActionText}>Switch Club</Text>
+            </PressableScale>
+            <Text style={styles.headerActionDivider}>·</Text>
+            <PressableScale onPress={signOut}>
+              <Text style={styles.headerActionText}>Sign Out</Text>
+            </PressableScale>
           </View>
         </View>
 
@@ -291,6 +313,19 @@ const styles = StyleSheet.create({
   },
   headerBars: {
     gap: spacing.sm,
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  headerActionText: {
+    ...typography.caption,
+    color: baseColors.textSecondary,
+  },
+  headerActionDivider: {
+    ...typography.caption,
+    color: baseColors.textTertiary,
   },
   controls: {
     paddingHorizontal: spacing.lg,

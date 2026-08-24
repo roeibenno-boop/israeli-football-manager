@@ -1,6 +1,7 @@
 import { Image, StyleSheet, Text, View } from 'react-native';
 import Svg, { ClipPath, Defs, Path, Polygon, Rect } from 'react-native-svg';
 
+import { clubCrestImages } from '@/components/club-crest-images';
 import { baseColors } from '@/theme';
 
 // Simple heraldic shield silhouette, normalized to a 100x120 box.
@@ -47,10 +48,16 @@ export function ClubCrest({
   const { width, fontSize } = SIZES[size];
   const height = Math.round(width * 1.2);
 
-  if (logoUrl) {
+  // Priority: an explicit logo_url (e.g. a properly licensed hosted asset,
+  // once one exists) beats the bundled local crest, which beats the
+  // generated shield.
+  const bundledCrest = fallbackName ? clubCrestImages[fallbackName.toUpperCase()] : undefined;
+  const imageSource = logoUrl ? { uri: logoUrl } : bundledCrest;
+
+  if (imageSource) {
     return (
       <Image
-        source={{ uri: logoUrl }}
+        source={imageSource}
         style={{ width, height, borderRadius: 4 }}
         resizeMode="contain"
         accessibilityLabel={fallbackName ? `${fallbackName} crest` : 'Club crest'}
