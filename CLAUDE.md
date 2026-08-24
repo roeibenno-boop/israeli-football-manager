@@ -62,7 +62,10 @@ Path alias: `@/*` resolves to `src/*` (see `tsconfig.json`), except
   birth_date (nullable), age (nullable), market_value, weekly_wage,
   contract_until, nationality`. `age` was added in `0003` because bulk-source
   data (Transfermarkt) gives age, not exact `birth_date` — use whichever is
-  populated; prefer `birth_date` when both are.
+  populated; prefer `birth_date` when both are. `0005` adds the rating
+  columns: `overall, potential` (smallint), `pace, shooting, passing,
+  dribbling, defending, physical` (smallint), `preferred_foot` (left|right|
+  both), `height_cm` (smallint) — all nullable until backfilled, see below.
 - **fixtures** — `id, competition (league|cup), round, kickoff_at,
   home_club_id -> clubs, away_club_id -> clubs, home_goals, away_goals,
   status (scheduled|live|finished|postponed)`
@@ -80,10 +83,49 @@ codegen wired up yet (Supabase can generate types from the live schema via
 once the Supabase CLI is in use).
 
 Migrations so far: `0001` initial schema, `0002` seeds the 14 real clubs,
-`0003` adds `players.age`, `0004` seeds all 393 real players. `0002`/`0004`
-were run via direct API calls (service_role key) rather than the SQL editor
-— they're kept as migration files for the record, but re-running them
-against a fresh project would need the SQL editor like `0001`/`0003` did.
+`0003` adds `players.age`, `0004` seeds all 393 real players, `0005` adds
+the rating columns (see "Rating system" below). `0002`/`0004` were run via
+direct API calls (service_role key) rather than the SQL editor — they're
+kept as migration files for the record, but re-running them against a fresh
+project would need the SQL editor like `0001`/`0003`/`0005` did.
+
+## Rating system
+
+- `src/lib/ratings.ts` — pure, deterministic functions (no I/O): given the
+  same inputs they always return the same outputs. That's required for
+  `scripts/backfill-ratings.ts` to be idempotent, and it's what makes the
+  functions unit-testable (`src/lib/ratings.test.ts`, run via `npm test`).
+  - `computeOverall(marketValueEur, age, position)` — log-scaled off market
+    value, adjusted by age bracket, clamped to [45, 88]. Takes `age`, not
+    `birthDate` as originally spec'd: our seeded player data is mostly
+    `age` with no `birth_date` (see above), so the function matches the
+    data that actually exists. Use `ageFromBirthDate()` (also exported) to
+    convert when you do have a real birth date. `position` is accepted for
+    interface symmetry / future tuning but unused by the current formula.
+  - `computePotential(overall, age)` — younger players get a bigger
+    headroom bump above `overall`. "Random" is a deterministic hash of
+    `(overall, age)`, not `Math.random()` — needed for idempotency.
+  - `deriveAttributes(overall, position, playerId)` — spreads
+    pace/shooting/passing/dribbling/defending/physical around `overall`
+    using per-position weights (e.g. a GK's shooting sits ~25 below
+    overall; a FW's ~12 above), plus small variance seeded from
+    `playerId` so a given player's numbers never change between runs.
+  - `computeClubRating(players)` — best-11-by-overall, then
+    attack/midfield/defence are that XI's FW/MF/DF group averages, and
+    overall is their weighted mean (GK 15%, DF 30%, MF 30%, FW 25%). Not
+    wired into any UI yet.
+- `scripts/backfill-ratings.ts` — fetches every player, computes
+  overall/potential/attributes, writes them back. Needs the service_role/
+  secret key (RLS blocks writes to `players` for the publishable key) —
+  passed as the `SUPABASE_SECRET_KEY` env var at run time, never stored in
+  `.env`. Run with `SUPABASE_SECRET_KEY=sb_secret_... npm run backfill-ratings`.
+  `preferred_foot`/`height_cm` aren't computed by this script — Transfermarkt's
+  bulk view doesn't have them either; those columns exist for a future data
+  source.
+- Testing: `vitest` (devDependency) + `npm test`. Chosen over
+  `jest`/`jest-expo` because `ratings.ts` is plain TS with no React Native
+  dependency — vitest needs no RN-specific transform setup. Running the TS
+  backfill script directly (outside Metro) uses `tsx` (devDependency).
 
 ## Auth & club-claiming flow
 

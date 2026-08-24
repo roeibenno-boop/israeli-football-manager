@@ -20,6 +20,7 @@ export interface Club {
 }
 
 export type PlayerPosition = 'GK' | 'DF' | 'MF' | 'FW';
+export type PreferredFoot = 'left' | 'right' | 'both';
 
 export interface Player {
   id: UUID;
@@ -34,6 +35,20 @@ export interface Player {
   weekly_wage: number;
   contract_until: ISODate | null;
   nationality: string;
+
+  // Rating system (0005_ratings.sql). Nullable until
+  // scripts/backfill-ratings.ts has been run for a given player — see
+  // src/lib/ratings.ts for how these are computed.
+  overall: number | null;
+  potential: number | null;
+  pace: number | null;
+  shooting: number | null;
+  passing: number | null;
+  dribbling: number | null;
+  defending: number | null;
+  physical: number | null;
+  preferred_foot: PreferredFoot | null;
+  height_cm: number | null;
 }
 
 export type Competition = 'league' | 'cup';
