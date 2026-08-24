@@ -17,6 +17,12 @@ export interface Club {
   league: string;
   budget: number;
   logo_url: string | null;
+
+  // Visual identity (0006_club_identity.sql). Nullable until backfilled —
+  // see src/components/ClubCrest.tsx for the fallback behavior.
+  primary_colour: string | null;
+  secondary_colour: string | null;
+  crest_initials: string | null;
 }
 
 export type PlayerPosition = 'GK' | 'DF' | 'MF' | 'FW';

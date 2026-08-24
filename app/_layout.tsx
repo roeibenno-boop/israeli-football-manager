@@ -1,18 +1,17 @@
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
-import { useColorScheme } from 'react-native';
+import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
 
 import { AuthProvider } from '@/lib/auth-context';
 
+// This product is dark-only by design (broadcast/sporting feel, not a
+// light/dark-adaptive business-app look) — no useColorScheme() branching.
 export default function RootLayout() {
-  const colorScheme = useColorScheme();
-
   return (
     <AuthProvider>
-      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-        <Stack screenOptions={{ headerTitleAlign: 'center' }}>
-          <Stack.Screen name="index" options={{ title: 'Squad' }} />
-          <Stack.Screen name="sign-in" options={{ headerShown: false }} />
-          <Stack.Screen name="pick-club" options={{ title: 'Choose Your Club' }} />
+      <ThemeProvider value={DarkTheme}>
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="(tabs)" />
+          <Stack.Screen name="sign-in" />
+          <Stack.Screen name="pick-club" />
         </Stack>
       </ThemeProvider>
     </AuthProvider>

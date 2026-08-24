@@ -1,18 +1,15 @@
 import { Redirect } from 'expo-router';
 import { useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, TextInput } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Spacing } from '@/constants/theme';
-import { useTheme } from '@/hooks/use-theme';
+import { PressableScale } from '@/components/PressableScale';
 import { useAuth } from '@/lib/auth-context';
 import { isSupabaseConfigured, supabase } from '@/lib/supabase';
+import { baseColors, radius, spacing, typography } from '@/theme';
 
 export default function SignInScreen() {
   const { session, loading: sessionLoading } = useAuth();
-  const theme = useTheme();
 
   const [mode, setMode] = useState<'sign-in' | 'sign-up'>('sign-in');
   const [email, setEmail] = useState('');
@@ -20,7 +17,6 @@ export default function SignInScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  // Already signed in — nothing to do here.
   if (!sessionLoading && session) {
     return <Redirect href="/" />;
   }
@@ -53,108 +49,128 @@ export default function SignInScreen() {
   };
 
   return (
-    <ThemedView style={styles.container}>
+    <View style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <ThemedText type="title" style={styles.title}>
-          Israeli Football Manager
-        </ThemedText>
-        <ThemedText type="small" themeColor="textSecondary" style={styles.subtitle}>
+        <Text style={styles.eyebrow}>Ligat ha'Al</Text>
+        <Text style={styles.title}>Israeli Football{'\n'}Manager</Text>
+        <Text style={styles.subtitle}>
           {mode === 'sign-in' ? 'Sign in to manage your club.' : 'Create an account to get started.'}
-        </ThemedText>
+        </Text>
 
-        <TextInput
-          style={[styles.input, { borderColor: theme.backgroundSelected, color: theme.text }]}
-          placeholder="Email"
-          placeholderTextColor={theme.textSecondary}
-          autoCapitalize="none"
-          autoCorrect={false}
-          keyboardType="email-address"
-          value={email}
-          onChangeText={setEmail}
-        />
-        <TextInput
-          style={[styles.input, { borderColor: theme.backgroundSelected, color: theme.text }]}
-          placeholder="Password"
-          placeholderTextColor={theme.textSecondary}
-          secureTextEntry
-          value={password}
-          onChangeText={setPassword}
-        />
+        <View style={styles.form}>
+          <TextInput
+            style={styles.input}
+            placeholder="Email"
+            placeholderTextColor={baseColors.textTertiary}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="email-address"
+            value={email}
+            onChangeText={setEmail}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="Password"
+            placeholderTextColor={baseColors.textTertiary}
+            secureTextEntry
+            value={password}
+            onChangeText={setPassword}
+          />
 
-        {message && (
-          <ThemedText type="small" themeColor="textSecondary" style={styles.message}>
-            {message}
-          </ThemedText>
-        )}
+          {message && <Text style={styles.message}>{message}</Text>}
 
-        <Pressable onPress={onSubmit} disabled={submitting}>
-          <ThemedView type="text" style={styles.button}>
+          <PressableScale style={styles.button} onPress={onSubmit} disabled={submitting}>
             {submitting ? (
-              <ActivityIndicator color={theme.background} />
+              <ActivityIndicator color={baseColors.textInverse} />
             ) : (
-              <ThemedText type="default" themeColor="background">
-                {mode === 'sign-in' ? 'Sign In' : 'Sign Up'}
-              </ThemedText>
+              <Text style={styles.buttonText}>{mode === 'sign-in' ? 'Sign In' : 'Sign Up'}</Text>
             )}
-          </ThemedView>
-        </Pressable>
+          </PressableScale>
 
-        <Pressable
-          style={styles.switchMode}
-          onPress={() => {
-            setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in');
-            setMessage(null);
-          }}>
-          <ThemedText type="small" themeColor="textSecondary">
-            {mode === 'sign-in' ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
-          </ThemedText>
-        </Pressable>
+          <PressableScale
+            style={styles.switchMode}
+            onPress={() => {
+              setMode(mode === 'sign-in' ? 'sign-up' : 'sign-in');
+              setMessage(null);
+            }}>
+            <Text style={styles.switchModeText}>
+              {mode === 'sign-in' ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
+            </Text>
+          </PressableScale>
+        </View>
       </SafeAreaView>
-    </ThemedView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: baseColors.background,
   },
   safeArea: {
     flex: 1,
     justifyContent: 'center',
-    paddingHorizontal: Spacing.four,
-    gap: Spacing.two,
-    maxWidth: 400,
+    paddingHorizontal: spacing.xl,
+    maxWidth: 420,
     alignSelf: 'center',
     width: '100%',
   },
-  title: {
+  eyebrow: {
+    ...typography.eyebrow,
+    color: baseColors.textTertiary,
     textAlign: 'center',
-    fontSize: 28,
-    lineHeight: 34,
-    marginBottom: Spacing.one,
+  },
+  title: {
+    ...typography.displayXL,
+    fontSize: 34,
+    lineHeight: 36,
+    color: baseColors.textPrimary,
+    textAlign: 'center',
+    marginTop: spacing.sm,
   },
   subtitle: {
+    ...typography.body,
+    color: baseColors.textSecondary,
     textAlign: 'center',
-    marginBottom: Spacing.three,
+    marginTop: spacing.md,
+    marginBottom: spacing.xl,
+  },
+  form: {
+    gap: spacing.md,
   },
   input: {
     borderWidth: 1,
-    borderRadius: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
+    borderColor: baseColors.border,
+    backgroundColor: baseColors.surface,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
     fontSize: 16,
+    color: baseColors.textPrimary,
   },
   message: {
+    ...typography.caption,
+    color: baseColors.textSecondary,
     textAlign: 'center',
   },
   button: {
-    borderRadius: Spacing.two,
-    paddingVertical: Spacing.two,
+    backgroundColor: baseColors.textPrimary,
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
     alignItems: 'center',
-    marginTop: Spacing.two,
+    marginTop: spacing.sm,
+  },
+  buttonText: {
+    ...typography.bodyBold,
+    color: baseColors.textInverse,
   },
   switchMode: {
     alignItems: 'center',
-    marginTop: Spacing.two,
+    paddingVertical: spacing.md,
+  },
+  switchModeText: {
+    ...typography.caption,
+    color: baseColors.textSecondary,
   },
 });
