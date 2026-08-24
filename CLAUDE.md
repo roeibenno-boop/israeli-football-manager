@@ -4,9 +4,11 @@ A football club management game for web and mobile, starting with the
 Israeli Premier League (Ligat ha'Al). Players manage a club: squad, transfers,
 finances, and fixtures against other clubs in the league.
 
-**Status:** project foundation only. No game logic (transfers, standings,
-match simulation, etc.) has been built yet — this repo currently just proves
-the app boots on web + mobile and can read/write Supabase.
+**Status:** early. The database is seeded with the real 2026/27 Ligat ha'Al
+clubs and squads (393 players, from Transfermarkt), and there's a working
+auth -> pick-a-club -> view-your-squad loop. No actual game logic yet
+(transfers, fixtures/results, match simulation, finances) — nothing changes
+over time and nothing is simulated.
 
 ## Stack
 
@@ -23,12 +25,19 @@ the app boots on web + mobile and can read/write Supabase.
 
 ```
 app/                  Screens/routes (expo-router). File path = URL path.
-                       app/_layout.tsx is the root layout (wraps every screen).
-                       app/index.tsx is the "/" route (currently the clubs list).
+                       _layout.tsx    root layout; wraps everything in AuthProvider.
+                       sign-in.tsx    email/password sign in + sign up.
+                       pick-club.tsx  claim an unmanaged club (sets profiles.managed_club_id).
+                       index.tsx      "/" — the signed-in user's squad screen.
 
 src/
   components/          Shared, reusable UI components (ThemedText, ThemedView, ...).
-  lib/                 Non-UI helpers. lib/supabase.ts is the Supabase client.
+  lib/                 Non-UI helpers.
+                       supabase.ts       the Supabase client.
+                       auth-context.tsx  AuthProvider/useAuth — current session, via
+                                         supabase.auth.onAuthStateChange.
+                       use-profile.ts    useProfile(session) — loads (or creates, on
+                                         first sign-in) the user's profiles row.
   types/               Shared TypeScript types (index.ts mirrors the DB schema).
   data/                Static seed data (plain data, no logic) for local dev/testing.
   constants/, hooks/   Theme tokens and small hooks (color scheme, theme lookup)
@@ -50,7 +59,10 @@ Path alias: `@/*` resolves to `src/*` (see `tsconfig.json`), except
 
 - **clubs** — `id, name, short_name, league, budget, logo_url`
 - **players** — `id, club_id -> clubs, full_name, position (GK|DF|MF|FW),
-  birth_date, market_value, weekly_wage, contract_until, nationality`
+  birth_date (nullable), age (nullable), market_value, weekly_wage,
+  contract_until, nationality`. `age` was added in `0003` because bulk-source
+  data (Transfermarkt) gives age, not exact `birth_date` — use whichever is
+  populated; prefer `birth_date` when both are.
 - **fixtures** — `id, competition (league|cup), round, kickoff_at,
   home_club_id -> clubs, away_club_id -> clubs, home_goals, away_goals,
   status (scheduled|live|finished|postponed)`
@@ -66,6 +78,32 @@ changes, update both the migration and the types together** — there's no
 codegen wired up yet (Supabase can generate types from the live schema via
 `supabase gen types typescript`, which would be a reasonable thing to add
 once the Supabase CLI is in use).
+
+Migrations so far: `0001` initial schema, `0002` seeds the 14 real clubs,
+`0003` adds `players.age`, `0004` seeds all 393 real players. `0002`/`0004`
+were run via direct API calls (service_role key) rather than the SQL editor
+— they're kept as migration files for the record, but re-running them
+against a fresh project would need the SQL editor like `0001`/`0003` did.
+
+## Auth & club-claiming flow
+
+- `app/sign-in.tsx` → email/password via `supabase.auth.signUp` /
+  `signInWithPassword`. Supabase's default "Confirm email" setting applies —
+  if it's on, a new user can't sign in until they click the confirmation
+  email; toggle it off in the dashboard (Authentication → Providers → Email)
+  for smoother local testing.
+- On first sign-in, `useProfile` creates the user's `profiles` row
+  automatically (`display_name` defaults to the email's local part).
+- `app/pick-club.tsx` lists all clubs and lets the user claim one
+  (`profiles.managed_club_id`). **Known simplification:** nothing stops two
+  accounts from claiming the same club — `profiles` RLS is owner-read-only,
+  so the client can't even see who's already claimed what. Fine for
+  single-player use; would need a public "claimed club ids" view/function
+  (not a full profile read) before this matters for real multi-user use.
+- `app/index.tsx` (the `/` route) is gated: no session → `/sign-in`; session
+  but no `managed_club_id` → `/pick-club`; otherwise renders that club's
+  squad. Each screen re-checks this itself (simple `<Redirect>`s) rather
+  than centralizing it — there's no route-group-level guard set up yet.
 
 ## Conventions
 

@@ -1,104 +1,106 @@
-import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, RefreshControl, StyleSheet } from 'react-native';
+import { Redirect } from 'expo-router';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
-import { isSupabaseConfigured, supabase } from '@/lib/supabase';
-import type { Club } from '@/types';
+import { useAuth } from '@/lib/auth-context';
+import { supabase } from '@/lib/supabase';
+import { useProfile } from '@/lib/use-profile';
+import type { Club, Player } from '@/types';
 
-export default function HomeScreen() {
-  const [clubs, setClubs] = useState<Club[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(
-    isSupabaseConfigured
-      ? null
-      : 'Supabase is not configured yet. Add EXPO_PUBLIC_SUPABASE_URL and ' +
-          'EXPO_PUBLIC_SUPABASE_ANON_KEY to .env (see .env.example) and restart the dev server.'
-  );
+export default function SquadScreen() {
+  const { session, loading: sessionLoading } = useAuth();
+  const { profile, loading: profileLoading } = useProfile(session);
 
-  const loadClubs = useCallback(async () => {
-    if (!isSupabaseConfigured) return;
+  const [club, setClub] = useState<Club | null>(null);
+  const [players, setPlayers] = useState<Player[]>([]);
+  const [loadingSquad, setLoadingSquad] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-    const { data, error: fetchError } = await supabase
-      .from('clubs')
-      .select('*')
-      .order('name', { ascending: true });
-
-    if (fetchError) {
-      setError(fetchError.message);
-    } else {
-      setError(null);
-      setClubs(data ?? []);
-    }
-  }, []);
+  const managedClubId = profile?.managed_club_id ?? null;
 
   useEffect(() => {
-    if (!isSupabaseConfigured) {
-      setLoading(false);
+    if (!managedClubId) {
+      setLoadingSquad(false);
       return;
     }
-    setLoading(true);
-    loadClubs().finally(() => setLoading(false));
-  }, [loadClubs]);
 
-  const onRefresh = useCallback(() => {
-    if (!isSupabaseConfigured) return;
-    setRefreshing(true);
-    loadClubs().finally(() => setRefreshing(false));
-  }, [loadClubs]);
+    let cancelled = false;
+    setLoadingSquad(true);
+
+    Promise.all([
+      supabase.from('clubs').select('*').eq('id', managedClubId).single(),
+      supabase.from('players').select('*').eq('club_id', managedClubId).order('position', { ascending: true }),
+    ]).then(([clubResult, playersResult]) => {
+      if (cancelled) return;
+      if (clubResult.error) setError(clubResult.error.message);
+      else setClub(clubResult.data);
+      if (playersResult.error) setError(playersResult.error.message);
+      else setPlayers(playersResult.data ?? []);
+      setLoadingSquad(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [managedClubId]);
+
+  // Order matters: only redirect once we actually know the answer.
+  if (!sessionLoading && !session) {
+    return <Redirect href="/sign-in" />;
+  }
+  if (!profileLoading && profile && !profile.managed_club_id) {
+    return <Redirect href="/pick-club" />;
+  }
+
+  const busy = sessionLoading || profileLoading || loadingSquad;
 
   return (
     <ThemedView style={styles.container}>
       <SafeAreaView style={styles.safeArea}>
-        <ThemedText type="subtitle" style={styles.title}>
-          Clubs
-        </ThemedText>
-        <ThemedText type="small" themeColor="textSecondary" style={styles.subtitle}>
-          Live from Supabase — confirms the app, database, and RLS policies are wired up correctly.
-        </ThemedText>
-
-        {loading && <ActivityIndicator style={styles.spacing} />}
-
-        {!loading && error && (
-          <ThemedView type="backgroundElement" style={styles.messageBox}>
-            <ThemedText type="smallBold">Couldn&apos;t load clubs</ThemedText>
-            <ThemedText type="small" themeColor="textSecondary">
-              {error}
+        {club && (
+          <>
+            <ThemedText type="subtitle">{club.name}</ThemedText>
+            <ThemedText type="small" themeColor="textSecondary" style={styles.subtitle}>
+              {players.length} player{players.length === 1 ? '' : 's'} in squad
             </ThemedText>
-            <ThemedText type="small" themeColor="textSecondary">
-              Check that EXPO_PUBLIC_SUPABASE_URL / EXPO_PUBLIC_SUPABASE_ANON_KEY are set in .env,
-              the dev server was restarted after adding them, and the migration has been run.
-            </ThemedText>
-          </ThemedView>
+          </>
         )}
 
-        {!loading && !error && clubs.length === 0 && (
-          <ThemedView type="backgroundElement" style={styles.messageBox}>
-            <ThemedText type="small" themeColor="textSecondary">
-              Connected, but no clubs yet. Insert a row into the clubs table in Supabase to see it
-              appear here.
-            </ThemedText>
-          </ThemedView>
+        {busy && <ActivityIndicator style={styles.spacing} />}
+        {error && (
+          <ThemedText type="small" themeColor="textSecondary">
+            {error}
+          </ThemedText>
+        )}
+        {!busy && !error && players.length === 0 && club && (
+          <ThemedText type="small" themeColor="textSecondary">
+            No players in this squad yet.
+          </ThemedText>
         )}
 
         <FlatList
-          data={clubs}
+          data={players}
           keyExtractor={(item) => item.id}
-          style={styles.list}
           contentContainerStyle={styles.listContent}
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
           renderItem={({ item }) => (
             <ThemedView type="backgroundElement" style={styles.row}>
-              <ThemedText type="default">{item.name}</ThemedText>
+              <ThemedText type="default">{item.full_name}</ThemedText>
               <ThemedText type="small" themeColor="textSecondary">
-                {item.short_name} · {item.league}
+                {item.position} · Age {item.age ?? '—'} · {item.nationality}
               </ThemedText>
             </ThemedView>
           )}
         />
+
+        <Pressable style={styles.signOut} onPress={() => supabase.auth.signOut()}>
+          <ThemedText type="small" themeColor="textSecondary">
+            Sign out
+          </ThemedText>
+        </Pressable>
       </SafeAreaView>
     </ThemedView>
   );
@@ -114,19 +116,11 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.four,
     gap: Spacing.two,
   },
-  title: {
-    textAlign: 'left',
-  },
   subtitle: {
     marginBottom: Spacing.two,
   },
   spacing: {
     marginTop: Spacing.four,
-  },
-  messageBox: {
-    borderRadius: Spacing.three,
-    padding: Spacing.three,
-    gap: Spacing.one,
   },
   list: {
     flex: 1,
@@ -139,5 +133,9 @@ const styles = StyleSheet.create({
     borderRadius: Spacing.three,
     padding: Spacing.three,
     gap: Spacing.half,
+  },
+  signOut: {
+    alignItems: 'center',
+    paddingVertical: Spacing.three,
   },
 });
