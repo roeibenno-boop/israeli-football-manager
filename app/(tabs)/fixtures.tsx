@@ -8,7 +8,7 @@ import { PressableScale } from '@/components/PressableScale';
 import { useAuth } from '@/lib/auth-context';
 import type { FormationKey } from '@/lib/formations';
 import type { SlotAssignment } from '@/lib/lineup';
-import { buildClubMatchInputs, simulateFixture } from '@/lib/play-match';
+import { buildClubMatchInputs, processFixture, type MatchStatRow, type PlayerConditionUpdate } from '@/lib/play-match';
 import type { MatchEvent } from '@/lib/simulation';
 import { supabase } from '@/lib/supabase';
 import { useProfile } from '@/lib/use-profile';
@@ -130,6 +130,22 @@ export default function FixturesScreen() {
         }
       }
 
+      // Season-to-date yellow counts, for the 5-yellows-is-a-ban rule --
+      // fetched once for everyone in the round rather than per-fixture.
+      const { data: priorStats, error: priorStatsError } = await supabase
+        .from('player_match_stats')
+        .select('player_id, yellow_cards')
+        .in('player_id', [...playersById.keys()]);
+      if (priorStatsError) throw priorStatsError;
+      const priorSeasonYellows = new Map<string, number>();
+      for (const row of priorStats ?? []) {
+        priorSeasonYellows.set(row.player_id, (priorSeasonYellows.get(row.player_id) ?? 0) + row.yellow_cards);
+      }
+
+      const allStatRows: MatchStatRow[] = [];
+      const allPlayerUpdates: PlayerConditionUpdate[] = [];
+      const clubRatingUpdates = new Map<string, number>();
+
       for (const fixture of roundFixtures) {
         const homeInputs = buildClubMatchInputs(
           playersByClub.get(fixture.home_club_id) ?? [],
@@ -139,9 +155,25 @@ export default function FixturesScreen() {
           playersByClub.get(fixture.away_club_id) ?? [],
           fixture.away_club_id === managedClubId ? userLineup : undefined
         );
-        const result = simulateFixture(fixture.id, homeInputs, awayInputs, playersById);
 
-        const { error: updateError } = await supabase
+        const result = processFixture({
+          fixtureId: fixture.id,
+          homeClubId: fixture.home_club_id,
+          awayClubId: fixture.away_club_id,
+          home: homeInputs,
+          away: awayInputs,
+          homeFullSquad: playersByClub.get(fixture.home_club_id) ?? [],
+          awayFullSquad: playersByClub.get(fixture.away_club_id) ?? [],
+          restDays: 7,
+          priorSeasonYellows,
+        });
+
+        allStatRows.push(...result.statRows);
+        allPlayerUpdates.push(...result.playerUpdates);
+        clubRatingUpdates.set(fixture.home_club_id, result.homeClubRating);
+        clubRatingUpdates.set(fixture.away_club_id, result.awayClubRating);
+
+        const { error: fixtureUpdateError } = await supabase
           .from('fixtures')
           .update({
             home_goals: result.homeGoals,
@@ -151,8 +183,77 @@ export default function FixturesScreen() {
             status: 'finished',
           })
           .eq('id', fixture.id);
-        if (updateError) throw updateError;
+        if (fixtureUpdateError) throw fixtureUpdateError;
       }
+
+      // Not a single transaction (Supabase's client API has no cross-table
+      // transaction primitive -- see play-match.ts's header comment).
+      // player_match_stats' unique(fixture_id, player_id) at least stops a
+      // retry from double-writing stats if something below fails.
+      const { error: statsError } = await supabase.from('player_match_stats').insert(
+        allStatRows.map((row) => ({
+          fixture_id: row.fixture_id,
+          player_id: row.playerId,
+          club_id: row.club_id,
+          minutes_played: row.minutesPlayed,
+          started: row.started,
+          goals: row.goals,
+          assists: row.assists,
+          shots: row.shots,
+          shots_on_target: row.shotsOnTarget,
+          key_passes: row.keyPasses,
+          passes_attempted: row.passesAttempted,
+          passes_completed: row.passesCompleted,
+          tackles: row.tackles,
+          interceptions: row.interceptions,
+          duels_won: row.duelsWon,
+          duels_lost: row.duelsLost,
+          saves: row.saves,
+          goals_conceded: row.goalsConceded,
+          clean_sheet: row.cleanSheet,
+          yellow_cards: row.yellowCards,
+          red_cards: row.redCards,
+          own_goals: row.ownGoals,
+          penalties_scored: row.penaltiesScored,
+          penalties_missed: row.penaltiesMissed,
+          match_rating: row.match_rating,
+          motm: row.motm,
+        }))
+      );
+      if (statsError) throw statsError;
+
+      const chunk = <T,>(items: T[], size: number): T[][] => {
+        const out: T[][] = [];
+        for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+        return out;
+      };
+
+      for (const batch of chunk(allPlayerUpdates, 20)) {
+        await Promise.all(
+          batch.map((update) =>
+            supabase
+              .from('players')
+              .update({
+                fatigue_points: update.fatigue_points,
+                fatigue_level: update.fatigue_level,
+                injured_until: update.injured_until,
+                suspended_matches: update.suspended_matches,
+                form: update.form,
+                season_goals: update.season_goals,
+                season_assists: update.season_assists,
+                season_apps: update.season_apps,
+                season_minutes: update.season_minutes,
+              })
+              .eq('id', update.playerId)
+          )
+        );
+      }
+
+      await Promise.all(
+        [...clubRatingUpdates.entries()].map(([clubId, rating]) =>
+          supabase.from('clubs').update({ current_rating: rating }).eq('id', clubId)
+        )
+      );
 
       await load();
     } catch (e) {

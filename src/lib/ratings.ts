@@ -129,19 +129,28 @@ export function deriveAttributes(overall: number, position: PlayerPosition, play
   return attributes;
 }
 
-// --- club rating -------------------------------------------------------
+// --- squad rating (estimator) -------------------------------------------
 
 export type RatedPlayer = { position: PlayerPosition; overall: number };
 export type ClubRating = { overall: number; attack: number; midfield: number; defence: number };
 
 /**
- * Best 11 by overall, then: attack/midfield/defence are the FW/MF/DF
+ * Best 11 by raw overall, then: attack/midfield/defence are the FW/MF/DF
  * averages within that XI, and overall is their weighted mean
  * (GK 15%, DF 30%, MF 30%, FW 25%). A position with nobody in the XI
  * (e.g. no GK made the cut) averages to 0 and still counts at its full
- * weight — a known simplification for this data-layer-only step.
+ * weight — a known simplification.
+ *
+ * This is a rough *estimate* from a squad list, not "the" club rating —
+ * since 0008_performance.sql, that's src/lib/lineup.ts's
+ * computeClubRating(startingXI), which uses a club's actual saved starting
+ * XI plus fatigue-adjusted effective overalls and out-of-position
+ * penalties. This function is still useful precisely because it doesn't
+ * need a concrete lineup: used to give AI clubs (nobody ever saves a
+ * lineup for them) a reasonable current_rating, and as a same-shaped
+ * fallback wherever no concrete XI exists yet.
  */
-export function computeClubRating(players: RatedPlayer[]): ClubRating {
+export function estimateSquadRating(players: RatedPlayer[]): ClubRating {
   const bestXI = [...players].sort((a, b) => b.overall - a.overall).slice(0, 11);
   const overallsFor = (pos: PlayerPosition) => bestXI.filter((p) => p.position === pos).map((p) => p.overall);
 

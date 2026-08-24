@@ -8,7 +8,7 @@ import { ClubCrest } from '@/components/ClubCrest';
 import { OverallBadge } from '@/components/OverallBadge';
 import { PressableScale } from '@/components/PressableScale';
 import { useAuth } from '@/lib/auth-context';
-import { computeClubRating, type RatedPlayer } from '@/lib/ratings';
+import { estimateSquadRating, type RatedPlayer } from '@/lib/ratings';
 import { supabase } from '@/lib/supabase';
 import { baseColors, radius, spacing, typography } from '@/theme';
 import { useProfile } from '@/lib/use-profile';
@@ -47,8 +47,15 @@ export default function PickClubScreen() {
       }
       const ratings: Record<string, number | null> = {};
       for (const club of clubsRes.data ?? []) {
+        // Prefer the persisted rating (set when a manager saves a lineup);
+        // most clubs never get one (nobody manages them), so fall back to
+        // a rough estimate from the full squad.
+        if (club.current_rating != null) {
+          ratings[club.id] = club.current_rating;
+          continue;
+        }
         const squad = byClub[club.id];
-        ratings[club.id] = squad && squad.length > 0 ? computeClubRating(squad).overall : null;
+        ratings[club.id] = squad && squad.length > 0 ? estimateSquadRating(squad).overall : null;
       }
       setRatingsByClub(ratings);
       setLoadingClubs(false);

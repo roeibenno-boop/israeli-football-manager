@@ -1,4 +1,4 @@
-export { baseColors, positionColors, tierColors, tierForOverall } from './colors';
+export { baseColors, fatigueColors, positionColors, tierColors, tierForOverall } from './colors';
 export type { OverallTier } from './colors';
 export { spacing, radius } from './spacing';
 export { typography } from './typography';

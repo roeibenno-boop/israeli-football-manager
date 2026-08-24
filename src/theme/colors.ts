@@ -45,3 +45,10 @@ export function tierForOverall(overall: number | null): OverallTier {
   if (overall >= 60) return 'bronze';
   return 'grey';
 }
+
+/** Fatigue dot / bracketed-effective-rating colours: green / amber / red. */
+export const fatigueColors = {
+  fresh: '#3ECF6B',
+  moderate: '#F2A93B',
+  tired: '#F2544C',
+} as const;

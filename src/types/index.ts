@@ -23,6 +23,13 @@ export interface Club {
   primary_colour: string | null;
   secondary_colour: string | null;
   crest_initials: string | null;
+
+  // Performance (0008_performance.sql). Derived live from the club's
+  // starting XI (src/lib/lineup.ts's computeClubRating) and persisted
+  // when a lineup is saved — see CLAUDE.md's "Club rating" section for why
+  // AI clubs (nobody ever saves a lineup for them) don't get one from
+  // normal gameplay alone.
+  current_rating: number | null;
 }
 
 export type PlayerPosition = 'GK' | 'DF' | 'MF' | 'FW';
@@ -55,7 +62,24 @@ export interface Player {
   physical: number | null;
   preferred_foot: PreferredFoot | null;
   height_cm: number | null;
+
+  // Condition (0008_performance.sql). fatigue_level is the UI-facing
+  // state; fatigue_points is the hidden 0-100 counter behind it — see
+  // src/lib/fatigue.ts. form/injured_until/suspended_matches and the
+  // season_* aggregates update after every simulated match
+  // (src/lib/play-match.ts).
+  fatigue_level: FatigueLevel;
+  fatigue_points: number;
+  form: number | null;
+  injured_until: ISODate | null;
+  suspended_matches: number | null;
+  season_goals: number;
+  season_assists: number;
+  season_apps: number;
+  season_minutes: number;
 }
+
+export type FatigueLevel = 'fresh' | 'moderate' | 'tired';
 
 export type Competition = 'league' | 'cup';
 export type FixtureStatus = 'scheduled' | 'live' | 'finished' | 'postponed';
@@ -106,4 +130,36 @@ export interface LineupSlot {
   /** e.g. "LB", "CM1" — see src/lib/formations.ts for the full set per formation. */
   slot_key: string;
   is_starter: boolean;
+}
+
+// Performance (0008_performance.sql)
+
+export interface PlayerMatchStat {
+  id: UUID;
+  fixture_id: UUID;
+  player_id: UUID;
+  club_id: UUID;
+  minutes_played: number;
+  started: boolean;
+  goals: number;
+  assists: number;
+  shots: number;
+  shots_on_target: number;
+  key_passes: number;
+  passes_attempted: number;
+  passes_completed: number;
+  tackles: number;
+  interceptions: number;
+  duels_won: number;
+  duels_lost: number;
+  saves: number;
+  goals_conceded: number;
+  clean_sheet: boolean;
+  yellow_cards: number;
+  red_cards: number;
+  own_goals: number;
+  penalties_scored: number;
+  penalties_missed: number;
+  match_rating: number | null;
+  motm: boolean;
 }

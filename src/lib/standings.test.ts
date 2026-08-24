@@ -14,6 +14,7 @@ function makeClub(id: string, name: string): Club {
     primary_colour: null,
     secondary_colour: null,
     crest_initials: null,
+    current_rating: null,
   };
 }
 

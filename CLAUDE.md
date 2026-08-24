@@ -5,7 +5,8 @@ Israeli Premier League (Ligat ha'Al). Players manage a club: squad,
 tactics, fixtures, and league progression.
 
 **Status:** core gameplay loop works end to end: auth → pick a club → view
-your real squad → build a lineup → play matches (simulated) → watch the
+your real squad → build a lineup → play matches (simulated, generating full
+per-player stats/ratings) → watch fatigue/form/injuries evolve and the
 table update. Still missing: transfers, finances, and a cup competition.
 
 ## Stack
@@ -37,48 +38,65 @@ app/
                        bars), sortable/filterable player list, tap a
                        player for PlayerDetailSheet. Switch Club / Sign Out.
     lineup.tsx          Formation switcher, pitch with shirt tokens,
-                       tap-slot-then-tap-bench to swap, live rating,
-                       auto-pick, save.
-    fixtures.tsx        Fixtures grouped by round, "Play Next Match",
-                       tap a played match for MatchTimelineSheet.
+                       tap-slot-then-tap-bench to swap, live rating (with
+                       delta from the previous XI), auto-pick, save.
+    performance.tsx      Sortable squad stats table (+ separate GK
+                       section), tap a player for PlayerMatchLogSheet.
+    fixtures.tsx        Fixtures grouped by round, "Play Next Match" (runs
+                       the full match-processing pipeline — see "Player
+                       condition & match performance"), tap a played match
+                       for MatchTimelineSheet.
     table.tsx           League standings, your club highlighted.
 
 src/
-  components/     Shared UI. ClubCrest, OverallBadge, PositionPill, StatBar,
+  components/     Shared UI. ClubCrest, OverallBadge (now fatigue-aware —
+                   see below), PositionPill, StatBar, FatigueDot,
                    PressableScale (shared tap-feedback wrapper used
                    everywhere), PlayerDetailSheet, MatchTimelineSheet,
-                   PlaceholderScreen, club-crest-images.ts (bundled crest
-                   asset lookup, see "Visual identity" below).
-  theme/           Dark-only design tokens (colors, spacing, typography)
-                   + ClubThemeProvider/useClubTheme (injects the managed
-                   club's colours via context).
+                   PlayerMatchLogSheet, PlaceholderScreen,
+                   club-crest-images.ts (bundled crest asset lookup, see
+                   "Visual identity" below).
+  theme/           Dark-only design tokens (colors incl. fatigueColors,
+                   spacing, typography) + ClubThemeProvider/useClubTheme
+                   (injects the managed club's colours via context).
   lib/             Non-UI logic.
                    supabase.ts        the Supabase client.
                    auth-context.tsx   AuthProvider/useAuth.
                    use-profile.ts     useProfile(session).
-                   ratings.ts         player/club rating engine (pure).
+                   ratings.ts         player rating engine + estimateSquadRating (pure).
+                   fatigue.ts         the 0-100 fatigue counter + effectiveOverall (pure).
+                   matchRating.ts     1.0-10.0 post-match player ratings (pure).
                    formations.ts      formation slot maps (pure data).
-                   lineup.ts          out-of-position penalties, live
-                                      lineup rating, auto-pick XI (pure).
-                   simulation.ts      seeded match engine (pure).
+                   lineup.ts          out-of-position penalties + THE club
+                                      rating (computeClubRating), auto-pick
+                                      XI (pure) — see "Football layer".
+                   simulation.ts      seeded match engine incl. full
+                                      per-player stat generation (pure).
                    fixtures.ts        round-robin season generator (pure).
                    standings.ts       league table computation (pure).
-                   play-match.ts      bridges a club's squad+lineup to
-                                      simulation.ts (pure-ish; the actual
-                                      Supabase orchestration lives in
-                                      app/(tabs)/fixtures.tsx).
+                   leaders.ts         season leaderboards from raw match
+                                      stats (pure).
+                   play-match.ts      processFixture: runs simulation.ts,
+                                      rates every player (matchRating.ts),
+                                      picks MOTM, works out fatigue/injury/
+                                      suspension/season-stat updates for
+                                      every player on both sides (pure —
+                                      the actual Supabase orchestration
+                                      lives in app/(tabs)/fixtures.tsx).
   types/           Shared TypeScript types (index.ts mirrors the DB schema).
   data/            Static seed data (plain data, no logic) for local dev/testing.
 
-scripts/           Standalone admin scripts (service_role key, run via tsx).
-                   backfill-ratings.ts, generate-fixtures.ts.
+scripts/           Standalone admin scripts (run via tsx).
+                   backfill-ratings.ts, generate-fixtures.ts (service_role
+                   key — data writes). run-migration.ts (database
+                   password — schema DDL; see "Migrations" below).
 
 supabase/
   migrations/      Hand-written SQL migrations, applied in filename order.
-                   No Supabase CLI/local stack — run manually via the SQL
-                   Editor (0001, 0003, 0005, 0006, 0007) or, for pure data
-                   migrations, via direct API calls with the service_role
-                   key (0002, 0004 — see below).
+                   No Supabase CLI/local stack — applied via
+                   scripts/run-migration.ts (a direct Postgres connection)
+                   once a database password was available (0005 onward);
+                   0001-0003 predate that and were run via the SQL Editor.
 
 assets/
   crests/          The 14 clubs' real crest images — user-supplied, local/
@@ -117,15 +135,32 @@ Path alias: `@/*` resolves to `src/*` (see `tsconfig.json`), except
 - **lineup_slots** (`0007`) — `lineup_id, player_id, slot_key, is_starter`,
   PK `(lineup_id, slot_key)`. `slot_key` matches a formation's slot keys
   from `src/lib/formations.ts` (e.g. `"LB"`, `"CM1"`).
+- **players**, continued (`0008`) — condition columns: `fatigue_level`
+  (fresh|moderate|tired), `fatigue_points` (hidden 0-100 counter behind
+  it), `form` (rolling average, default 6.5), `injured_until` (date),
+  `suspended_matches`, `season_goals`/`season_assists`/`season_apps`/
+  `season_minutes`. See "Player condition & match performance".
+- **clubs**, continued (`0008`) — `current_rating` (smallint). THE club
+  rating (see "Football layer") — persisted when a lineup is saved and
+  refreshed after each match played; null for a club nobody has ever
+  saved a lineup for (in practice, any AI club — see below).
+- **player_match_stats** (`0008`) — one row per player per fixture they
+  appeared in: `fixture_id, player_id, club_id, minutes_played, started`,
+  the full counting-stats line (goals/assists/shots/passes/tackles/
+  interceptions/duels/saves/cards/own_goals/penalties), `clean_sheet`,
+  `match_rating` (1.0-10.0), `motm`. `unique(fixture_id, player_id)`.
 
-RLS: `clubs`, `players`, `fixtures` are readable by anyone. `fixtures` is
-also **updatable by any authenticated user** (`0007`) — a deliberate,
-documented simplification: fixtures/the table are shared league-wide state,
-not owned by one manager, so a per-owner policy doesn't fit; "Play Next
-Match" needs to be able to write results from a plain user session. Revisit
-before any real multi-user use. `profiles` and `lineups`/`lineup_slots` are
-owner-only (`auth.uid() = profile_id`, `lineup_slots` via a join back to
-its parent lineup).
+RLS: `clubs`, `players`, `fixtures`, `player_match_stats` are readable by
+anyone. `fixtures`, `players`, and `clubs` are also **updatable by any
+authenticated user** (`0007`/`0008`), and `player_match_stats` is
+**insertable/updatable by any authenticated user** (`0008`) — a
+deliberate, documented simplification: fixtures/the table/player condition
+are shared league-wide state, not owned by one manager, so a per-owner
+policy doesn't fit; "Play Next Match" needs to be able to write match
+results and every affected player's condition from a plain user session.
+Revisit before any real multi-user use. `profiles` and `lineups`/
+`lineup_slots` are owner-only (`auth.uid() = profile_id`, `lineup_slots`
+via a join back to its parent lineup).
 
 `src/types/index.ts` mirrors these tables by hand. **When the schema
 changes, update both the migration and the types together** — there's no
@@ -136,11 +171,12 @@ Migrations so far: `0001` initial schema, `0002` seeds the 14 real clubs,
 `0003` adds `players.age`, `0004` seeds all 393 real players, `0005` adds
 the rating columns, `0006` adds club colours/crest initials, `0007` adds
 lineups/lineup_slots + the fixtures tactics/events columns + the fixtures
-update policy. `0002`/`0004` (pure data) were run via direct API calls
-(service_role key) rather than the SQL editor; `0001`/`0003`/`0005`/`0006`/
-`0007` are schema changes (DDL) and need the SQL Editor — Claude has no
-DDL-capable credential, only the service_role/publishable API keys, which
-can't run `alter table`/`create table`.
+update policy, `0008` adds player_match_stats + condition columns +
+clubs.current_rating + their write policies. `0002`/`0004` (pure data)
+were run via direct API calls (service_role key). `0001`-`0003` (DDL) were
+run via the SQL Editor, back when that was the only option; `0005` onward
+were applied directly via `scripts/run-migration.ts` (see "Migrations" in
+Conventions) once a database password became available.
 
 ## Visual identity
 
@@ -187,11 +223,15 @@ can't run `alter table`/`create table`.
     pace/shooting/passing/dribbling/defending/physical around `overall`
     using per-position weights, plus small variance seeded from
     `playerId` so a given player's numbers never change between runs.
-  - `computeClubRating(players)` — best-11-by-overall, then
+  - `estimateSquadRating(players)` — best-11-by-*raw* overall, then
     attack/midfield/defence are that XI's FW/MF/DF group averages, and
-    overall is their weighted mean (GK 15%, DF 30%, MF 30%, FW 25%). Used
-    both for the squad screen's header bars and (via `lineup.ts`) for
-    live lineup rating and match simulation inputs.
+    overall is their weighted mean (GK 15%, DF 30%, MF 30%, FW 25%). Named
+    `computeClubRating` before `0008_performance.sql` — renamed when a
+    fatigue/lineup-aware version was added to `lineup.ts` under the old
+    name (see "Football layer"); this one is now just a rough *estimate*
+    from a squad list, used where no concrete starting XI exists (mainly:
+    giving AI clubs — nobody ever saves a lineup for them — something to
+    show on the pick-club screen).
 - `scripts/backfill-ratings.ts` — fetches every player, computes
   overall/potential/attributes, writes them back. Needs the service_role/
   secret key, passed as `SUPABASE_SECRET_KEY` at run time, never stored in
@@ -207,10 +247,18 @@ can't run `alter table`/`create table`.
   attacking/defensive-midfield concept, so e.g. every non-GK/DF/FW slot in
   4-2-3-1 (both the double pivot and the front three) is tagged `MF`.
 - `src/lib/lineup.ts` — out-of-position penalty (same group: 0, one group
-  away on the GK-DF-MF-FW chain: -5, two+ away: -10), live lineup rating
-  (feeds penalty-adjusted overalls through `computeClubRating`), a greedy
-  `autoPickBestXI` (exact position matches first, then best-remaining-fit
-  — not a true optimal assignment, but deterministic and good enough), and
+  away on the GK-DF-MF-FW chain: -5, two+ away: -10), stacked with
+  fatigue's `effectiveOverall` (fatigue applied first, position penalty on
+  top — two penalties compounding on a tired player fielded out of
+  position is intentional). `computeClubRating(startingXI)` is **the**
+  club rating: takes the actual starting XI (exactly 11 `{slotGroup,
+  player}` entries, no best-11 selection — the XI you give it *is* the
+  XI), same GK/DF/MF/FW weighted-mean shape as `estimateSquadRating` but
+  using effective overalls throughout. `autoPickBestXI` is a greedy
+  assignment (exact position matches by effective overall first, then
+  best-remaining-fit — not a true optimal assignment, but deterministic
+  and good enough) that also excludes injured/suspended players outright,
+  so it naturally rotates tired/unavailable players out.
   `shirtNumberFor(playerId)` — players have no stored squad number, so the
   lineup screen derives a stable display number from a hash of the id.
 - `app/(tabs)/lineup.tsx` — loads the manager's most recent saved lineup
@@ -224,10 +272,17 @@ can't run `alter table`/`create table`.
   FNV-1a hash of the seed, typically the fixture id). Expected goals per
   side from attack vs. opponent defence rating (log-free ratio model, ~1.35
   league-average goals/team, home advantage 1.12x), actual goals sampled
-  via Knuth's Poisson algorithm. Goal scorers are weighted-random by
-  `shooting` among outfield players (goalkeepers excluded from the pool);
-  cards are Poisson-ish random with no attribute weighting. Pure — returns
-  a `MatchResult`, no Supabase/UI in this file.
+  via Knuth's Poisson algorithm. Callers are expected to pass *effective*
+  (fatigue-adjusted, via `lineup.ts`'s `computeClubRating`) attack/defence
+  ratings — this file has no fatigue concept of its own, it just trusts
+  what it's given, so a tired XI genuinely creates worse chances. Goal
+  scorers are weighted-random by `shooting` among outfield players
+  (goalkeepers excluded from the pool), each goal ~75% likely to also get
+  a weighted-random (by `passing`) assist. Also generates a full per-player
+  stat line for both full XIs (shots/passes/tackles/duels/saves,
+  consistent with the actual goals/cards in `events`) — see "Player
+  condition & match performance". Pure — returns a `MatchResult`, no
+  Supabase/UI in this file.
 - `src/lib/fixtures.ts` — `generateSeasonFixtures`: standard circle-method
   round-robin, doubled (home + away) — 14 clubs → 26 rounds × 7 matches =
   182 fixtures. Requires an even team count (true for our 14; throws
@@ -242,14 +297,88 @@ can't run `alter table`/`create table`.
   club name. **Simplification:** no head-to-head sub-table, which real
   league regulations often apply before goal difference. Tested in
   `standings.test.ts`.
-- `src/lib/play-match.ts` + the "Play Next Match" button in
-  `app/(tabs)/fixtures.tsx`: finds the manager's next `scheduled` fixture,
-  simulates every fixture in that same round (not just the manager's —
-  round-robin means all 14 clubs play every round), using each club's most
-  recent saved lineup if one exists, else an auto-picked 4-3-3, and writes
-  `home_goals`/`away_goals`/`events`/`attendance`/`status='finished'` back.
-  This is a plain authenticated write, not a service_role script — see the
-  `fixtures` RLS note above.
+- `src/lib/play-match.ts` (`processFixture`) + the "Play Next Match" button
+  in `app/(tabs)/fixtures.tsx`: finds the manager's next `scheduled`
+  fixture, processes every fixture in that same round (not just the
+  manager's — round-robin means all 14 clubs play every round), using each
+  club's most recent saved lineup if one exists, else an auto-picked
+  4-3-3. Full pipeline per fixture — see "Player condition & match
+  performance" for what "processes" means. Writes are plain authenticated
+  writes, not a service_role script — see the RLS note above.
+
+## Player condition & match performance
+
+- `src/lib/fatigue.ts` — a hidden 0-100 `fatigue_points` counter drives
+  three UI-facing states (`fresh`/`moderate`/`tired`, 0-33/34-66/67-100).
+  `accumulateFatigue`/`recoverFatigue` both apply an age factor (older
+  players tire faster and recover slower; under-23s the opposite) — a full
+  90 minutes takes a fresh player to ~moderate, a second on top of that to
+  tired; ~4-5 rest days (one round/week) brings moderate back to fresh.
+  `effectiveOverall(overall, level)`: fresh +0, moderate -4, tired -11
+  (floored at 40) — meant to visibly hurt, not nudge. `rollInjury(level,
+  rng)` takes a caller-supplied seeded RNG (so injuries stay reproducible
+  from a match seed) — risk 1%/3%/8% by level, 1-4 week duration.
+- `src/components/OverallBadge.tsx` — the one place fatigue-aware display
+  lives. Given a `fatigueLevel` that isn't `fresh`, renders `"72 (68)"`
+  (true, then effective in brackets, coloured amber/red) instead of just
+  `"72"` — every screen that shows a player's overall goes through this
+  component, so it's consistent everywhere by construction, not by
+  convention. `FatigueDot` (green/amber/red) is the standalone version for
+  next to a name.
+- `src/lib/matchRating.ts` — `rateOutfieldPlayer` (position-aware: e.g. a
+  defender's goal bonus is bigger than a forward's, only defenders are
+  penalized for goals conceded) and `rateGoalkeeper` (separate formula
+  entirely — saves/clean sheets/goals conceded, plus `penaltiesSaved`/
+  `errorsLeadingToGoal` fields that exist for the interface but our own
+  simulation never populates, since it doesn't model penalty awards or
+  keeper errors as distinct events). Both start from a 6.0 baseline, clamp
+  to [1.0, 10.0]. A sub appearance under 20 minutes gets pulled back
+  toward 6.0 rather than swinging on a handful of stats.
+  `pickManOfTheMatch`: highest rating, ties broken by goals then assists.
+- `src/lib/leaders.ts` — `buildLeaderRows(stats, players)` aggregates raw
+  `player_match_stats` rows into season totals (goals/assists/avg rating/
+  MOTM/clean sheets/cards/saves/minutes) *itself*, rather than trusting
+  `players.season_*` (those are a display convenience updated alongside,
+  not the source of truth here). `topScorers`/`topAssisters`/
+  `bestAverageRating` (min 5 apps)/`mostMotm`/`mostCleanSheets` (GK only)/
+  `mostCards`. "League-wide or per club" isn't a separate parameter — every
+  row carries `clubId`, filter before calling.
+- `src/lib/play-match.ts`'s `processFixture` is the full per-match
+  pipeline: runs `simulation.ts` with both sides' `computeClubRating`,
+  rates every player who appeared via `matchRating.ts`, picks one overall
+  MOTM, and for **every player on both full squads** (not just the 22 who
+  played) works out: fatigue accumulate-or-recover, an injury roll for
+  those who played (risk based on their fatigue level going *into* the
+  match), a suspension decrement for anyone serving a ban who didn't play,
+  a new ban for a red card or a 5th season yellow (needs the caller to
+  supply prior season yellow counts — see below), a rolling `form` update
+  (70% old / 30% this match's rating), and the season aggregate deltas.
+  **Known simplifications**, all documented in the file itself: no
+  substitutions (all 11 starters play the full 90 — matches what the
+  lineup screen can even express), own goals and penalties always 0 (the
+  stat generator doesn't model either as distinct events, though the
+  columns/rating modifiers exist for a future data source).
+- `app/(tabs)/fixtures.tsx`'s "Play Next Match" is the orchestration: for
+  the round, fetches every involved club's full squad plus season-to-date
+  yellow counts (`player_match_stats` aggregated per player, needed for
+  the 5-yellows rule), calls `processFixture` per fixture, then writes
+  `player_match_stats` (batch insert), every player's condition update
+  (batched, chunks of 20 concurrent), each club's refreshed
+  `current_rating`, and finally marks the fixtures `finished`.
+  **Not a single database transaction** — Supabase's client REST API has
+  no cross-table transaction primitive; true atomicity would need a
+  Postgres function (rewriting this whole pipeline in plpgsql), which is
+  out of scope. `player_match_stats`' `unique(fixture_id, player_id)` at
+  least means a retry after a partial failure fails loudly (constraint
+  violation) instead of silently double-writing stats.
+- `app/(tabs)/performance.tsx` — new tab. Sortable table (tap a stat chip)
+  for outfield players, a separate goalkeeper section (saves/clean sheets/
+  save %), built from `leaders.ts` over that club's `player_match_stats`.
+  Every row shows the fatigue dot + bracketed effective overall (via
+  `OverallBadge`) and a form arrow (rolling `form` vs. that row's season
+  average `avgRating` — up/down/flat within ±0.2). Injured/suspended
+  players are visually greyed. Tap a player for `PlayerMatchLogSheet`
+  (that player's match-by-match season log).
 
 ## Auth & club-claiming flow
 
@@ -285,9 +414,14 @@ can't run `alter table`/`create table`.
   it falls back to a placeholder client and exports `isSupabaseConfigured`
   instead, so the app can show a helpful message instead of crashing.
 - SQL migrations are plain `.sql` files, numbered sequentially
-  (`000N_description.sql`), applied by hand for now. Keep each migration
-  additive/forward-only rather than editing a past one, once it's been run
-  against the real project.
+  (`000N_description.sql`). Keep each migration additive/forward-only
+  rather than editing a past one, once it's been run against the real
+  project. Apply one with `scripts/run-migration.ts`:
+  `SUPABASE_DB_PASSWORD=... npx tsx scripts/run-migration.ts supabase/migrations/000N_x.sql`
+  — the password is a discrete connection field, not embedded in a
+  connection-string URL (avoids URL-encoding whatever's in it), and is
+  never stored in `.env` or committed. The SQL Editor still works too, if
+  preferred for a given change.
 - File naming: kebab-case for non-component files/hooks (`use-profile.ts`,
   `club-theme.tsx`); PascalCase for component files (`ClubCrest.tsx`,
   `PressableScale.tsx`) — the newer convention, post visual-identity

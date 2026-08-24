@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { computeClubRating, computeOverall, computePotential, deriveAttributes } from './ratings';
+import { estimateSquadRating, computeOverall, computePotential, deriveAttributes } from './ratings';
 
 describe('computeOverall', () => {
   it('applies the young-player penalty below age 21', () => {
@@ -123,7 +123,7 @@ describe('deriveAttributes', () => {
   });
 });
 
-describe('computeClubRating', () => {
+describe('estimateSquadRating', () => {
   it('weights GK/DF/MF/FW group averages as 15/30/30/25', () => {
     const squad = [
       { position: 'GK' as const, overall: 70 },
@@ -139,7 +139,7 @@ describe('computeClubRating', () => {
       { position: 'FW' as const, overall: 75 },
     ];
     // Exactly 11 players -> the whole squad is the best XI, no ambiguity.
-    const rating = computeClubRating(squad);
+    const rating = estimateSquadRating(squad);
     expect(rating.defence).toBe(60);
     expect(rating.midfield).toBe(65);
     expect(rating.attack).toBe(75);
@@ -150,7 +150,7 @@ describe('computeClubRating', () => {
   it('only considers the best 11 by overall', () => {
     const strongXI = Array.from({ length: 11 }, () => ({ position: 'MF' as const, overall: 80 }));
     const weakBench = Array.from({ length: 5 }, () => ({ position: 'FW' as const, overall: 40 }));
-    const rating = computeClubRating([...strongXI, ...weakBench]);
+    const rating = estimateSquadRating([...strongXI, ...weakBench]);
     // The weak bench FWs shouldn't be in the XI, so attack (no FW in XI) is 0,
     // not dragged toward 40.
     expect(rating.attack).toBe(0);
@@ -158,6 +158,6 @@ describe('computeClubRating', () => {
   });
 
   it('does not throw on an empty squad', () => {
-    expect(computeClubRating([])).toEqual({ overall: 0, attack: 0, midfield: 0, defence: 0 });
+    expect(estimateSquadRating([])).toEqual({ overall: 0, attack: 0, midfield: 0, defence: 0 });
   });
 });

@@ -5,13 +5,15 @@ import Animated, { FadeInDown } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ClubCrest } from '@/components/ClubCrest';
+import { FatigueDot } from '@/components/FatigueDot';
 import { OverallBadge } from '@/components/OverallBadge';
 import { PlayerDetailSheet } from '@/components/PlayerDetailSheet';
 import { PositionPill } from '@/components/PositionPill';
 import { PressableScale } from '@/components/PressableScale';
 import { StatBar } from '@/components/StatBar';
 import { useAuth } from '@/lib/auth-context';
-import { computeClubRating } from '@/lib/ratings';
+import type { FormationKey } from '@/lib/formations';
+import { computeLineupRating, type ClubRating, type SlotAssignment } from '@/lib/lineup';
 import { supabase } from '@/lib/supabase';
 import { useProfile } from '@/lib/use-profile';
 import { baseColors, radius, spacing, typography, useClubTheme } from '@/theme';
@@ -47,6 +49,9 @@ export default function SquadScreen() {
   const [sortDescending, setSortDescending] = useState(true);
   const [positionFilter, setPositionFilter] = useState<PlayerPosition | null>(null);
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
+  const [savedLineup, setSavedLineup] = useState<{ formation: FormationKey; assignment: SlotAssignment } | null>(
+    null
+  );
 
   const managedClubId = profile?.managed_club_id ?? null;
 
@@ -75,10 +80,49 @@ export default function SquadScreen() {
     };
   }, [managedClubId]);
 
-  const clubRating = useMemo(() => {
-    const rated = players.filter((p) => p.overall != null).map((p) => ({ position: p.position, overall: p.overall! }));
-    return computeClubRating(rated);
-  }, [players]);
+  // Load the manager's saved lineup so the header shows the SAME rating
+  // (attack/mid/def included) as the lineup screen -- "there is ONE club
+  // rating". Falls back to just club.current_rating (no bars) if no
+  // lineup has ever been saved yet.
+  useEffect(() => {
+    if (players.length === 0 || !session) return;
+    let cancelled = false;
+
+    (async () => {
+      const { data: lineupRows } = await supabase
+        .from('lineups')
+        .select('id, formation')
+        .eq('profile_id', session.user.id)
+        .order('created_at', { ascending: false })
+        .limit(1);
+      if (cancelled || !lineupRows || lineupRows.length === 0) return;
+
+      const { data: slotRows } = await supabase
+        .from('lineup_slots')
+        .select('slot_key, player_id')
+        .eq('lineup_id', lineupRows[0].id);
+      if (cancelled || !slotRows || slotRows.length === 0) return;
+
+      const assignment: SlotAssignment = {};
+      for (const row of slotRows) assignment[row.slot_key] = row.player_id;
+      setSavedLineup({ formation: lineupRows[0].formation as FormationKey, assignment });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [players.length > 0, session?.user.id]);
+
+  const playersById = useMemo(() => new Map(players.map((p) => [p.id, p])), [players]);
+
+  const clubRating: ClubRating = useMemo(() => {
+    if (savedLineup) {
+      const live = computeLineupRating(savedLineup.formation, savedLineup.assignment, playersById);
+      if (live.overall > 0) return live;
+    }
+    const persisted = club?.current_rating ?? 0;
+    return { overall: persisted, attack: 0, midfield: 0, defence: 0 };
+  }, [savedLineup, playersById, club?.current_rating]);
 
   const visiblePlayers = useMemo(() => {
     let list = players;
@@ -150,11 +194,15 @@ export default function SquadScreen() {
             <OverallBadge overall={clubRating.overall > 0 ? clubRating.overall : null} size="lg" />
           </View>
 
-          <View style={styles.headerBars}>
-            <StatBar label="Attack" value={clubRating.attack} color="#F2544C" />
-            <StatBar label="Midfield" value={clubRating.midfield} color="#3ECF6B" />
-            <StatBar label="Defence" value={clubRating.defence} color="#4C8DF2" />
-          </View>
+          {savedLineup ? (
+            <View style={styles.headerBars}>
+              <StatBar label="Attack" value={clubRating.attack} color="#F2544C" />
+              <StatBar label="Midfield" value={clubRating.midfield} color="#3ECF6B" />
+              <StatBar label="Defence" value={clubRating.defence} color="#4C8DF2" />
+            </View>
+          ) : (
+            <Text style={styles.noLineupHint}>Save a lineup to see attack/midfield/defence.</Text>
+          )}
 
           <View style={styles.headerActions}>
             <PressableScale onPress={switchClub}>
@@ -259,23 +307,36 @@ function PlayerRow({
   accent: string;
   onPress: () => void;
 }) {
+  const unavailable = isInjured(player) || (player.suspended_matches ?? 0) > 0;
+
   return (
     <Animated.View entering={FadeInDown.duration(220).delay(Math.min(index, 12) * 25)}>
-      <PressableScale style={styles.playerRow} onPress={onPress} scaleTo={0.98}>
-        <OverallBadge overall={player.overall} size="md" />
+      <PressableScale style={[styles.playerRow, unavailable && styles.playerRowUnavailable]} onPress={onPress} scaleTo={0.98}>
+        <OverallBadge overall={player.overall} fatigueLevel={player.fatigue_level} size="md" />
         <View style={styles.playerInfo}>
-          <Text style={styles.playerName} numberOfLines={1}>
-            {player.full_name}
-          </Text>
+          <View style={styles.playerNameRow}>
+            <FatigueDot level={player.fatigue_level} />
+            <Text style={styles.playerName} numberOfLines={1}>
+              {player.full_name}
+            </Text>
+          </View>
           <View style={styles.playerMeta}>
             <PositionPill position={player.position} size="sm" />
             <Text style={styles.playerMetaText}>Age {player.age ?? '—'}</Text>
+            {unavailable && (
+              <Text style={styles.unavailableText}>{isInjured(player) ? 'Injured' : 'Suspended'}</Text>
+            )}
           </View>
         </View>
         <Text style={[styles.playerValue, { color: accent }]}>{formatMarketValue(player.market_value)}</Text>
       </PressableScale>
     </Animated.View>
   );
+}
+
+function isInjured(player: Player): boolean {
+  if (!player.injured_until) return false;
+  return player.injured_until >= new Date().toISOString().slice(0, 10);
 }
 
 const styles = StyleSheet.create({
@@ -313,6 +374,10 @@ const styles = StyleSheet.create({
   },
   headerBars: {
     gap: spacing.sm,
+  },
+  noLineupHint: {
+    ...typography.caption,
+    color: baseColors.textTertiary,
   },
   headerActions: {
     flexDirection: 'row',
@@ -388,9 +453,17 @@ const styles = StyleSheet.create({
     borderColor: baseColors.border,
     padding: spacing.md,
   },
+  playerRowUnavailable: {
+    opacity: 0.5,
+  },
   playerInfo: {
     flex: 1,
     gap: 4,
+  },
+  playerNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
   },
   playerName: {
     ...typography.bodyBold,
@@ -400,6 +473,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
+  },
+  unavailableText: {
+    ...typography.caption,
+    color: '#F2544C',
   },
   playerMetaText: {
     ...typography.caption,

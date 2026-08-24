@@ -89,6 +89,7 @@ function TabsNavigator({ clubName }: { clubName?: string }) {
       }}>
       <Tabs.Screen name="index" options={{ title: 'Squad', tabBarAccessibilityLabel: `${clubName ?? ''} squad` }} />
       <Tabs.Screen name="lineup" options={{ title: 'Lineup' }} />
+      <Tabs.Screen name="performance" options={{ title: 'Stats' }} />
       <Tabs.Screen name="fixtures" options={{ title: 'Fixtures' }} />
       <Tabs.Screen name="table" options={{ title: 'Table' }} />
     </Tabs>

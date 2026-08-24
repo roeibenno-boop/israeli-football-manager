@@ -8,7 +8,12 @@
 
 import type { Club } from '@/types';
 
-const visualDefaults = { primary_colour: null, secondary_colour: null, crest_initials: null } as const;
+const visualDefaults = {
+  primary_colour: null,
+  secondary_colour: null,
+  crest_initials: null,
+  current_rating: null,
+} as const;
 
 export const clubsSeed: Array<Omit<Club, 'id'>> = [
   { name: 'Maccabi Tel Aviv', short_name: 'MTA', league: "Ligat ha'Al", budget: 0, logo_url: null, ...visualDefaults },

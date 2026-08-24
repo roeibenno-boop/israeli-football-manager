@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Rect } from 'react-native-svg';
 
+import { FatigueDot } from '@/components/FatigueDot';
 import { OverallBadge } from '@/components/OverallBadge';
 import { PositionPill } from '@/components/PositionPill';
 import { PressableScale } from '@/components/PressableScale';
@@ -123,6 +124,19 @@ export default function LineupScreen() {
   );
   const slots = formations[formationKey];
 
+  // Delta from the previous XI -- so the cost of resting a tired star (or
+  // any other swap) is immediately visible. null until there's a "before"
+  // to compare against (i.e. not shown on first load).
+  const previousOverallRef = useRef<number | null>(null);
+  const [ratingDelta, setRatingDelta] = useState<number | null>(null);
+  useEffect(() => {
+    if (rating.overall <= 0) return;
+    if (previousOverallRef.current != null && previousOverallRef.current !== rating.overall) {
+      setRatingDelta(rating.overall - previousOverallRef.current);
+    }
+    previousOverallRef.current = rating.overall;
+  }, [rating.overall]);
+
   const switchFormation = (key: FormationKey) => {
     setFormationKey(key);
     setAssignment(autoPickBestXI(players, key));
@@ -187,6 +201,10 @@ export default function LineupScreen() {
       const { error: slotsError } = await supabase.from('lineup_slots').insert(slotRows);
       if (slotsError) throw slotsError;
 
+      if (managedClubId && rating.overall > 0) {
+        await supabase.from('clubs').update({ current_rating: rating.overall }).eq('id', managedClubId);
+      }
+
       setSaveMessage('Lineup saved.');
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Failed to save lineup.';
@@ -219,7 +237,15 @@ export default function LineupScreen() {
                 {club?.name ?? '—'}
               </Text>
             </View>
-            <OverallBadge overall={rating.overall > 0 ? rating.overall : null} size="lg" />
+            <View style={styles.ratingBlock}>
+              <OverallBadge overall={rating.overall > 0 ? rating.overall : null} size="lg" />
+              {ratingDelta != null && ratingDelta !== 0 && (
+                <Text style={[styles.ratingDelta, { color: ratingDelta > 0 ? '#3ECF6B' : '#F2544C' }]}>
+                  {ratingDelta > 0 ? '▲' : '▼'}
+                  {Math.abs(ratingDelta)}
+                </Text>
+              )}
+            </View>
           </View>
 
           {error && <Text style={styles.error}>{error}</Text>}
@@ -285,11 +311,14 @@ export default function LineupScreen() {
                 style={[styles.benchRow, !selectedSlot && styles.benchRowInactive]}
                 onPress={() => onTapBench(player.id)}
                 disabled={!selectedSlot}>
-                <OverallBadge overall={player.overall} size="sm" />
+                <OverallBadge overall={player.overall} fatigueLevel={player.fatigue_level} size="sm" />
                 <View style={styles.benchInfo}>
-                  <Text style={styles.benchName} numberOfLines={1}>
-                    {player.full_name}
-                  </Text>
+                  <View style={styles.benchNameRow}>
+                    <FatigueDot level={player.fatigue_level} />
+                    <Text style={styles.benchName} numberOfLines={1}>
+                      {player.full_name}
+                    </Text>
+                  </View>
                   <PositionPill position={player.position} size="sm" />
                 </View>
               </PressableScale>
@@ -336,13 +365,16 @@ function ShirtToken({
     <View style={[styles.tokenWrapper, { left: `${slot.x}%`, top: `${100 - slot.y}%` }]}>
       <PressableScale onPress={onPress} style={[styles.token, { backgroundColor: accent, borderColor }]}>
         <Text style={styles.tokenNumber}>{player ? shirtNumberFor(player.id) : '–'}</Text>
+        {player && (
+          <View style={styles.tokenFatigueDot}>
+            <FatigueDot level={player.fatigue_level} size={7} />
+          </View>
+        )}
       </PressableScale>
       <Text style={styles.tokenName} numberOfLines={1}>
         {player ? player.full_name.split(' ').slice(-1)[0] : slot.label}
       </Text>
-      {player && (
-        <Text style={styles.tokenOverall}>{adjustedOverall(player, slot.group)}</Text>
-      )}
+      {player && <Text style={styles.tokenOverall}>{adjustedOverall(player, slot.group)}</Text>}
     </View>
   );
 }
@@ -378,6 +410,14 @@ const styles = StyleSheet.create({
   title: {
     ...typography.displayLG,
     color: baseColors.textPrimary,
+  },
+  ratingBlock: {
+    alignItems: 'center',
+    gap: 2,
+  },
+  ratingDelta: {
+    fontSize: 12,
+    fontWeight: '800',
   },
   error: {
     ...typography.body,
@@ -426,6 +466,11 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  tokenFatigueDot: {
+    position: 'absolute',
+    top: -1,
+    right: -1,
   },
   tokenNumber: {
     fontSize: 14,
@@ -499,6 +544,11 @@ const styles = StyleSheet.create({
   benchInfo: {
     flex: 1,
     gap: 4,
+  },
+  benchNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
   },
   benchName: {
     ...typography.bodyBold,
