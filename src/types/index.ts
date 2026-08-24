@@ -26,7 +26,10 @@ export interface Player {
   club_id: UUID;
   full_name: string;
   position: PlayerPosition;
-  birth_date: ISODate;
+  /** Exact date of birth, when known. Prefer `age` when only that is available. */
+  birth_date: ISODate | null;
+  /** Age in years, e.g. from a bulk data source that doesn't expose exact birth_date. */
+  age: number | null;
   market_value: number;
   weekly_wage: number;
   contract_until: ISODate | null;
