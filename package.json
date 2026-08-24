@@ -45,7 +45,8 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "test": "vitest run",
-    "backfill-ratings": "tsx scripts/backfill-ratings.ts"
+    "backfill-ratings": "tsx scripts/backfill-ratings.ts",
+    "generate-fixtures": "tsx scripts/generate-fixtures.ts"
   },
   "private": true
 }

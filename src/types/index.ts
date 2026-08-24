@@ -70,6 +70,14 @@ export interface Fixture {
   home_goals: number | null;
   away_goals: number | null;
   status: FixtureStatus;
+
+  // Tactics (0007_tactics.sql). Nullable — most fixtures are simulated
+  // without either side ever setting an explicit lineup for the AI side.
+  attendance: number | null;
+  home_lineup_id: UUID | null;
+  away_lineup_id: UUID | null;
+  /** MatchEvent[] from src/lib/simulation.ts, set once the fixture is simulated. */
+  events: unknown[] | null;
 }
 
 export interface Profile {
@@ -79,4 +87,23 @@ export interface Profile {
   managed_club_id: UUID | null;
   cash_balance: number;
   created_at: ISOTimestamp;
+}
+
+// Tactics (0007_tactics.sql)
+
+export type FormationName = '4-3-3' | '4-4-2' | '4-2-3-1' | '3-5-2' | '5-3-2';
+
+export interface Lineup {
+  id: UUID;
+  profile_id: UUID;
+  formation: FormationName;
+  created_at: ISOTimestamp;
+}
+
+export interface LineupSlot {
+  lineup_id: UUID;
+  player_id: UUID;
+  /** e.g. "LB", "CM1" — see src/lib/formations.ts for the full set per formation. */
+  slot_key: string;
+  is_starter: boolean;
 }

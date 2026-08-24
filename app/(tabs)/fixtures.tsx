@@ -1,10 +1,395 @@
-import { PlaceholderScreen } from '@/components/PlaceholderScreen';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, SectionList, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+
+import { ClubCrest } from '@/components/ClubCrest';
+import { MatchTimelineSheet } from '@/components/MatchTimelineSheet';
+import { PressableScale } from '@/components/PressableScale';
+import { useAuth } from '@/lib/auth-context';
+import type { FormationKey } from '@/lib/formations';
+import type { SlotAssignment } from '@/lib/lineup';
+import { buildClubMatchInputs, simulateFixture } from '@/lib/play-match';
+import type { MatchEvent } from '@/lib/simulation';
+import { supabase } from '@/lib/supabase';
+import { useProfile } from '@/lib/use-profile';
+import { baseColors, radius, spacing, typography, useClubTheme } from '@/theme';
+import type { Club, Fixture, Player } from '@/types';
+
+type Section = { round: number; data: Fixture[] };
+
+function formatKickoff(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
 
 export default function FixturesScreen() {
+  const { session } = useAuth();
+  const { profile } = useProfile(session);
+  const theme = useClubTheme();
+
+  const [clubs, setClubs] = useState<Club[]>([]);
+  const [fixtures, setFixtures] = useState<Fixture[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [playError, setPlayError] = useState<string | null>(null);
+  const [selectedFixture, setSelectedFixture] = useState<Fixture | null>(null);
+
+  const managedClubId = profile?.managed_club_id ?? null;
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const [clubsRes, fixturesRes] = await Promise.all([
+      supabase.from('clubs').select('*'),
+      supabase
+        .from('fixtures')
+        .select('*')
+        .eq('competition', 'league')
+        .order('round', { ascending: true })
+        .order('kickoff_at', { ascending: true }),
+    ]);
+    if (clubsRes.error) setError(clubsRes.error.message);
+    else setClubs(clubsRes.data ?? []);
+    if (fixturesRes.error) setError(fixturesRes.error.message);
+    else setError(null);
+    setFixtures(fixturesRes.data ?? []);
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const clubsById = useMemo(() => new Map(clubs.map((c) => [c.id, c])), [clubs]);
+
+  const sections = useMemo<Section[]>(() => {
+    const byRound = new Map<number, Fixture[]>();
+    for (const fixture of fixtures) {
+      (byRound.get(fixture.round) ?? byRound.set(fixture.round, []).get(fixture.round)!).push(fixture);
+    }
+    return [...byRound.entries()].sort((a, b) => a[0] - b[0]).map(([round, data]) => ({ round, data }));
+  }, [fixtures]);
+
+  const playNextMatch = async () => {
+    if (!managedClubId) return;
+    setPlaying(true);
+    setPlayError(null);
+
+    try {
+      const nextFixture = fixtures
+        .filter((f) => f.status === 'scheduled' && (f.home_club_id === managedClubId || f.away_club_id === managedClubId))
+        .sort((a, b) => a.round - b.round)[0];
+
+      if (!nextFixture) {
+        setPlayError('No more fixtures to play this season.');
+        return;
+      }
+
+      const roundFixtures = fixtures.filter((f) => f.round === nextFixture.round && f.status === 'scheduled');
+      const clubIdsInRound = new Set<string>();
+      roundFixtures.forEach((f) => {
+        clubIdsInRound.add(f.home_club_id);
+        clubIdsInRound.add(f.away_club_id);
+      });
+
+      const { data: roundPlayers, error: playersError } = await supabase
+        .from('players')
+        .select('*')
+        .in('club_id', [...clubIdsInRound]);
+      if (playersError) throw playersError;
+
+      const playersById = new Map((roundPlayers ?? []).map((p) => [p.id, p]));
+      const playersByClub = new Map<string, Player[]>();
+      for (const p of roundPlayers ?? []) {
+        (playersByClub.get(p.club_id) ?? playersByClub.set(p.club_id, []).get(p.club_id)!).push(p);
+      }
+
+      let userLineup: { formation: FormationKey; assignment: SlotAssignment } | undefined;
+      if (session) {
+        const { data: lineupRows } = await supabase
+          .from('lineups')
+          .select('id, formation')
+          .eq('profile_id', session.user.id)
+          .order('created_at', { ascending: false })
+          .limit(1);
+        if (lineupRows && lineupRows.length > 0) {
+          const { data: slotRows } = await supabase
+            .from('lineup_slots')
+            .select('slot_key, player_id')
+            .eq('lineup_id', lineupRows[0].id);
+          if (slotRows && slotRows.length > 0) {
+            const assignment: SlotAssignment = {};
+            for (const row of slotRows) assignment[row.slot_key] = row.player_id;
+            userLineup = { formation: lineupRows[0].formation as FormationKey, assignment };
+          }
+        }
+      }
+
+      for (const fixture of roundFixtures) {
+        const homeInputs = buildClubMatchInputs(
+          playersByClub.get(fixture.home_club_id) ?? [],
+          fixture.home_club_id === managedClubId ? userLineup : undefined
+        );
+        const awayInputs = buildClubMatchInputs(
+          playersByClub.get(fixture.away_club_id) ?? [],
+          fixture.away_club_id === managedClubId ? userLineup : undefined
+        );
+        const result = simulateFixture(fixture.id, homeInputs, awayInputs, playersById);
+
+        const { error: updateError } = await supabase
+          .from('fixtures')
+          .update({
+            home_goals: result.homeGoals,
+            away_goals: result.awayGoals,
+            events: result.events,
+            attendance: result.attendance,
+            status: 'finished',
+          })
+          .eq('id', fixture.id);
+        if (updateError) throw updateError;
+      }
+
+      await load();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Failed to play the round.';
+      setPlayError(
+        message.includes('does not exist') || message.includes('schema cache') || message.includes('permission denied')
+          ? "Can't play matches yet — run migration 0007 first."
+          : message
+      );
+    } finally {
+      setPlaying(false);
+    }
+  };
+
+  const hasNextMatch = fixtures.some(
+    (f) => f.status === 'scheduled' && (f.home_club_id === managedClubId || f.away_club_id === managedClubId)
+  );
+
   return (
-    <PlaceholderScreen
-      title="Fixtures"
-      description="Your upcoming league and cup matches will show up here — not built yet."
-    />
+    <View style={styles.container}>
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
+        <View style={styles.header}>
+          <Text style={styles.eyebrow}>Ligat ha&apos;Al</Text>
+          <Text style={styles.title}>Fixtures</Text>
+        </View>
+
+        <View style={styles.playRow}>
+          <PressableScale
+            style={[styles.playButton, { backgroundColor: theme.accent }, (!hasNextMatch || playing) && styles.playButtonDisabled]}
+            onPress={playNextMatch}
+            disabled={!hasNextMatch || playing}>
+            {playing ? (
+              <ActivityIndicator color={baseColors.textInverse} />
+            ) : (
+              <Text style={styles.playButtonText}>
+                {hasNextMatch ? 'Play Next Match' : 'Season Complete'}
+              </Text>
+            )}
+          </PressableScale>
+          {playError && <Text style={styles.error}>{playError}</Text>}
+        </View>
+
+        {loading && <ActivityIndicator style={styles.spinner} color={baseColors.textSecondary} />}
+        {error && <Text style={styles.error}>{error}</Text>}
+        {!loading && !error && fixtures.length === 0 && (
+          <Text style={styles.empty}>
+            No fixtures yet — run `npm run generate-fixtures` (needs the service_role key) to schedule a season.
+          </Text>
+        )}
+
+        <SectionList
+          sections={sections}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.listContent}
+          renderSectionHeader={({ section }) => (
+            <Text style={styles.roundHeader}>Round {section.round}</Text>
+          )}
+          renderItem={({ item }) => (
+            <MatchRow
+              fixture={item}
+              homeClub={clubsById.get(item.home_club_id)}
+              awayClub={clubsById.get(item.away_club_id)}
+              highlighted={item.home_club_id === managedClubId || item.away_club_id === managedClubId}
+              onPress={() => setSelectedFixture(item)}
+            />
+          )}
+        />
+      </SafeAreaView>
+
+      <MatchTimelineSheet
+        fixture={selectedFixture as (Fixture & { events: MatchEvent[] | null }) | null}
+        homeClub={selectedFixture ? clubsById.get(selectedFixture.home_club_id) : undefined}
+        awayClub={selectedFixture ? clubsById.get(selectedFixture.away_club_id) : undefined}
+        onClose={() => setSelectedFixture(null)}
+      />
+    </View>
   );
 }
+
+function MatchRow({
+  fixture,
+  homeClub,
+  awayClub,
+  highlighted,
+  onPress,
+}: {
+  fixture: Fixture;
+  homeClub: Club | undefined;
+  awayClub: Club | undefined;
+  highlighted: boolean;
+  onPress: () => void;
+}) {
+  const played = fixture.status === 'finished';
+  return (
+    <PressableScale style={[styles.matchRow, highlighted && styles.matchRowHighlighted]} onPress={onPress} disabled={!played}>
+      <View style={styles.matchTeam}>
+        <ClubCrest
+          primaryColour={homeClub?.primary_colour}
+          secondaryColour={homeClub?.secondary_colour}
+          initials={homeClub?.crest_initials}
+          logoUrl={homeClub?.logo_url}
+          fallbackName={homeClub?.short_name}
+          size="sm"
+        />
+        <Text style={styles.matchTeamName} numberOfLines={1}>
+          {homeClub?.short_name ?? '—'}
+        </Text>
+      </View>
+
+      <View style={styles.matchCenter}>
+        {played ? (
+          <Text style={styles.matchScore}>
+            {fixture.home_goals} - {fixture.away_goals}
+          </Text>
+        ) : (
+          <Text style={styles.matchKickoff}>{formatKickoff(fixture.kickoff_at)}</Text>
+        )}
+      </View>
+
+      <View style={[styles.matchTeam, styles.matchTeamAway]}>
+        <Text style={styles.matchTeamName} numberOfLines={1}>
+          {awayClub?.short_name ?? '—'}
+        </Text>
+        <ClubCrest
+          primaryColour={awayClub?.primary_colour}
+          secondaryColour={awayClub?.secondary_colour}
+          initials={awayClub?.crest_initials}
+          logoUrl={awayClub?.logo_url}
+          fallbackName={awayClub?.short_name}
+          size="sm"
+        />
+      </View>
+    </PressableScale>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: baseColors.background,
+  },
+  safeArea: {
+    flex: 1,
+  },
+  header: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.lg,
+  },
+  eyebrow: {
+    ...typography.eyebrow,
+    color: baseColors.textTertiary,
+  },
+  title: {
+    ...typography.displayXL,
+    color: baseColors.textPrimary,
+  },
+  playRow: {
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.md,
+    gap: spacing.xs,
+  },
+  playButton: {
+    borderRadius: radius.md,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+  },
+  playButtonDisabled: {
+    opacity: 0.4,
+  },
+  playButtonText: {
+    ...typography.bodyBold,
+    color: baseColors.textInverse,
+  },
+  spinner: {
+    marginTop: spacing.xl,
+  },
+  error: {
+    ...typography.caption,
+    color: '#F2544C',
+    paddingHorizontal: spacing.lg,
+  },
+  empty: {
+    ...typography.body,
+    color: baseColors.textSecondary,
+    textAlign: 'center',
+    paddingHorizontal: spacing.lg,
+    marginTop: spacing.lg,
+  },
+  listContent: {
+    padding: spacing.lg,
+    gap: spacing.xs,
+  },
+  roundHeader: {
+    ...typography.eyebrow,
+    color: baseColors.textTertiary,
+    backgroundColor: baseColors.background,
+    paddingVertical: spacing.sm,
+  },
+  matchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: baseColors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: baseColors.border,
+    padding: spacing.md,
+    marginBottom: spacing.xs,
+  },
+  matchRowHighlighted: {
+    borderColor: baseColors.borderStrong,
+  },
+  matchTeam: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  matchTeamAway: {
+    justifyContent: 'flex-end',
+  },
+  matchTeamName: {
+    ...typography.caption,
+    color: baseColors.textPrimary,
+    flexShrink: 1,
+  },
+  matchCenter: {
+    paddingHorizontal: spacing.md,
+    minWidth: 88,
+    alignItems: 'center',
+  },
+  matchScore: {
+    ...typography.numericMD,
+    color: baseColors.textPrimary,
+  },
+  matchKickoff: {
+    ...typography.caption,
+    color: baseColors.textTertiary,
+    textAlign: 'center',
+  },
+});
