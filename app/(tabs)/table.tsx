@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, FlatList, StyleSheet, Text, View } from 'react-native';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
+import { ActivityIndicator, FlatList, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { FormGuide } from '@/components/FormGuide';
 import { useAuth } from '@/lib/auth-context';
 import { computeStandings, type StandingsRow } from '@/lib/standings';
 import { supabase } from '@/lib/supabase';
@@ -20,23 +22,29 @@ export default function TableScreen() {
 
   const managedClubId = profile?.managed_club_id ?? null;
 
-  useEffect(() => {
-    let cancelled = false;
-    Promise.all([
-      supabase.from('clubs').select('*'),
-      supabase.from('fixtures').select('*').eq('competition', 'league'),
-    ]).then(([clubsRes, fixturesRes]) => {
-      if (cancelled) return;
-      if (clubsRes.error) setError(clubsRes.error.message);
-      else setClubs(clubsRes.data ?? []);
-      if (fixturesRes.error) setError(fixturesRes.error.message);
-      setFixtures(fixturesRes.data ?? []);
-      setLoading(false);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // Refetches on every focus -- see the squad screen's equivalent comment
+  // for why (Expo Router keeps tabs mounted; without this the table
+  // wouldn't reflect a match just played from the Fixtures tab).
+  useFocusEffect(
+    useCallback(() => {
+      let cancelled = false;
+      setLoading(true);
+      Promise.all([
+        supabase.from('clubs').select('*'),
+        supabase.from('fixtures').select('*').eq('competition', 'league'),
+      ]).then(([clubsRes, fixturesRes]) => {
+        if (cancelled) return;
+        if (clubsRes.error) setError(clubsRes.error.message);
+        else setClubs(clubsRes.data ?? []);
+        if (fixturesRes.error) setError(fixturesRes.error.message);
+        setFixtures(fixturesRes.data ?? []);
+        setLoading(false);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }, [])
+  );
 
   const standings = useMemo(() => computeStandings(fixtures, clubs), [fixtures, clubs]);
 
@@ -52,29 +60,32 @@ export default function TableScreen() {
         {error && <Text style={styles.error}>{error}</Text>}
 
         {!loading && (
-          <>
-            <View style={styles.columnHeader}>
-              <Text style={[styles.columnHeaderText, styles.colPos]}>#</Text>
-              <Text style={[styles.columnHeaderText, styles.colClub]}>Club</Text>
-              <Text style={[styles.columnHeaderText, styles.colStat]}>P</Text>
-              <Text style={[styles.columnHeaderText, styles.colStat]}>W</Text>
-              <Text style={[styles.columnHeaderText, styles.colStat]}>D</Text>
-              <Text style={[styles.columnHeaderText, styles.colStat]}>L</Text>
-              <Text style={[styles.columnHeaderText, styles.colStat]}>GF</Text>
-              <Text style={[styles.columnHeaderText, styles.colStat]}>GA</Text>
-              <Text style={[styles.columnHeaderText, styles.colStat]}>GD</Text>
-              <Text style={[styles.columnHeaderText, styles.colPts]}>Pts</Text>
-            </View>
+          <ScrollView horizontal>
+            <View>
+              <View style={styles.columnHeader}>
+                <Text style={[styles.columnHeaderText, styles.colPos]}>#</Text>
+                <Text style={[styles.columnHeaderText, styles.colClub]}>Club</Text>
+                <Text style={[styles.columnHeaderText, styles.colStat]}>P</Text>
+                <Text style={[styles.columnHeaderText, styles.colStat]}>W</Text>
+                <Text style={[styles.columnHeaderText, styles.colStat]}>D</Text>
+                <Text style={[styles.columnHeaderText, styles.colStat]}>L</Text>
+                <Text style={[styles.columnHeaderText, styles.colStat]}>GF</Text>
+                <Text style={[styles.columnHeaderText, styles.colStat]}>GA</Text>
+                <Text style={[styles.columnHeaderText, styles.colStat]}>GD</Text>
+                <Text style={[styles.columnHeaderText, styles.colPts]}>Pts</Text>
+                <Text style={[styles.columnHeaderText, styles.colForm]}>Form</Text>
+              </View>
 
-            <FlatList
-              data={standings}
-              keyExtractor={(row) => row.club.id}
-              contentContainerStyle={styles.listContent}
-              renderItem={({ item, index }) => (
-                <TableRow row={item} position={index + 1} highlighted={item.club.id === managedClubId} />
-              )}
-            />
-          </>
+              <FlatList
+                data={standings}
+                keyExtractor={(row) => row.club.id}
+                contentContainerStyle={styles.listContent}
+                renderItem={({ item, index }) => (
+                  <TableRow row={item} position={index + 1} highlighted={item.club.id === managedClubId} />
+                )}
+              />
+            </View>
+          </ScrollView>
         )}
       </SafeAreaView>
     </View>
@@ -96,6 +107,9 @@ function TableRow({ row, position, highlighted }: { row: StandingsRow; position:
       <Text style={[styles.cellText, styles.colStat]}>{row.goalsAgainst}</Text>
       <Text style={[styles.cellText, styles.colStat]}>{row.goalDifference}</Text>
       <Text style={[styles.cellText, styles.colPts, styles.pts]}>{row.points}</Text>
+      <View style={styles.colForm}>
+        <FormGuide formString={row.club.form_string} size="sm" />
+      </View>
     </View>
   );
 }
@@ -176,6 +190,10 @@ const styles = StyleSheet.create({
   },
   colStat: {
     width: 26,
+  },
+  colForm: {
+    width: 100,
+    paddingLeft: spacing.md,
   },
   colPts: {
     width: 32,

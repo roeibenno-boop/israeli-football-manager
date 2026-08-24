@@ -12,6 +12,7 @@ export default function RootLayout() {
           <Stack.Screen name="(tabs)" />
           <Stack.Screen name="sign-in" />
           <Stack.Screen name="pick-club" />
+          <Stack.Screen name="match/[fixtureId]" options={{ presentation: 'modal' }} />
         </Stack>
       </ThemeProvider>
     </AuthProvider>

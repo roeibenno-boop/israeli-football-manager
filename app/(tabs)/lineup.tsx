@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Rect } from 'react-native-svg';
@@ -34,31 +35,38 @@ export default function LineupScreen() {
 
   const managedClubId = profile?.managed_club_id ?? null;
 
-  // Load club + squad.
-  useEffect(() => {
-    if (!managedClubId) {
-      setLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
+  // Load club + squad. Refetches on every focus, not just first mount --
+  // Expo Router keeps tabs mounted, so this is what keeps fatigue/overall
+  // fresh here after a match is played from the Fixtures tab. Note this
+  // only refreshes `players`/`club` -- it deliberately does NOT touch
+  // `assignment`/`formationKey` (the user's in-progress edit), which is
+  // hydrated once, separately, below.
+  useFocusEffect(
+    useCallback(() => {
+      if (!managedClubId) {
+        setLoading(false);
+        return;
+      }
+      let cancelled = false;
+      setLoading(true);
 
-    Promise.all([
-      supabase.from('clubs').select('*').eq('id', managedClubId).single(),
-      supabase.from('players').select('*').eq('club_id', managedClubId),
-    ]).then(([clubResult, playersResult]) => {
-      if (cancelled) return;
-      if (clubResult.error) setError(clubResult.error.message);
-      else setClub(clubResult.data);
-      if (playersResult.error) setError(playersResult.error.message);
-      else setPlayers(playersResult.data ?? []);
-      setLoading(false);
-    });
+      Promise.all([
+        supabase.from('clubs').select('*').eq('id', managedClubId).single(),
+        supabase.from('players').select('*').eq('club_id', managedClubId),
+      ]).then(([clubResult, playersResult]) => {
+        if (cancelled) return;
+        if (clubResult.error) setError(clubResult.error.message);
+        else setClub(clubResult.data);
+        if (playersResult.error) setError(playersResult.error.message);
+        else setPlayers(playersResult.data ?? []);
+        setLoading(false);
+      });
 
-    return () => {
-      cancelled = true;
-    };
-  }, [managedClubId]);
+      return () => {
+        cancelled = true;
+      };
+    }, [managedClubId])
+  );
 
   // Once the squad is available, load a saved lineup if one exists, else
   // auto-pick a default. Deliberately keyed on the squad going from empty

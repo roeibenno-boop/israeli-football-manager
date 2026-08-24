@@ -13,6 +13,8 @@ const visualDefaults = {
   secondary_colour: null,
   crest_initials: null,
   current_rating: null,
+  form_string: null,
+  momentum: null,
 } as const;
 
 export const clubsSeed: Array<Omit<Club, 'id'>> = [

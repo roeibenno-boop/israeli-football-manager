@@ -15,6 +15,8 @@ function makeClub(id: string, name: string): Club {
     secondary_colour: null,
     crest_initials: null,
     current_rating: null,
+    form_string: null,
+    momentum: null,
   };
 }
 

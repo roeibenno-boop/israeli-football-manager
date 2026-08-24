@@ -3,16 +3,24 @@
 // testability and so a match can be safely re-derived (e.g. re-fetched)
 // without silently changing its own outcome.
 //
-// Callers are expected to pass EFFECTIVE (fatigue-adjusted) attack/defence
-// ratings -- see src/lib/lineup.ts's computeClubRating -- so a tired XI
-// genuinely creates fewer/worse chances and concedes more. This file has
-// no fatigue concept of its own; it just trusts the ratings it's given.
+// The outcome/scoreline model itself is matchOdds.ts's exact closed-form
+// Davidson model -- this file just drives it (one seeded rng stream feeds
+// the outcome draw, the conditional scoreline, goal scorer/assist
+// selection, cards, and the rest of the stat generation) and turns the
+// result into events + a full per-player stat line. Callers pass each
+// side's EFFECTIVE (fatigue-adjusted) XI rating + momentum -- see
+// lineup.ts's computeClubRating and matchOdds.ts's computeMomentum -- this
+// file has no fatigue/form concept of its own, it just trusts what it's
+// given, so a tired or out-of-form XI genuinely creates fewer/worse
+// chances and concedes more.
 //
 // Known simplifications, documented rather than half-implemented: no
 // substitutions (all 11 starters play the full 90 -- matches what the
 // lineup screen can even express), own goals always 0, penalties always 0
 // (goals scored via penalty aren't distinguished from open play).
 
+import { computeDiff, sampleScoreline, CONFIG as ODDS_CONFIG } from './matchOdds';
+import type { EffectiveRatingValue } from './lineup';
 import type { PlayerPosition } from '../types';
 
 type SeededRng = () => number;
@@ -65,18 +73,6 @@ function weightedPick<T>(items: T[], weight: (item: T) => number, rng: SeededRng
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
-}
-
-const LEAGUE_AVERAGE_GOALS = 1.35;
-const LEAGUE_AVERAGE_RATING = 65;
-const HOME_ADVANTAGE = 1.12;
-
-/** Expected goals for one side, from its attack rating vs the opponent's defence rating. */
-export function expectedGoals(attack: number, opponentDefence: number, isHome: boolean): number {
-  const attackFactor = attack / LEAGUE_AVERAGE_RATING;
-  const defenceFactor = LEAGUE_AVERAGE_RATING / Math.max(1, opponentDefence);
-  const xg = LEAGUE_AVERAGE_GOALS * attackFactor * defenceFactor * (isHome ? HOME_ADVANTAGE : 1);
-  return Math.min(4.5, Math.max(0.2, xg));
 }
 
 export type SimPlayer = {
@@ -141,10 +137,12 @@ export type MatchResult = {
 export type SimulateMatchParams = {
   /** Any value that uniquely identifies this match -- e.g. the fixture id. */
   seed: number | string;
-  homeAttack: number;
-  homeDefence: number;
-  awayAttack: number;
-  awayDefence: number;
+  /** Effective (fatigue-adjusted) XI overall -- lineup.ts's computeClubRating(...).overall. */
+  homeRating: EffectiveRatingValue;
+  awayRating: EffectiveRatingValue;
+  /** matchOdds.ts's computeMomentum output for each side (0 if unknown/early season). */
+  homeMomentum: number;
+  awayMomentum: number;
   homeSquad: SimPlayer[];
   awaySquad: SimPlayer[];
 };
@@ -330,11 +328,14 @@ function generateSquadStats(
 export function simulateMatch(params: SimulateMatchParams): MatchResult {
   const rng = makeRng(params.seed);
 
-  const homeXG = expectedGoals(params.homeAttack, params.awayDefence, true);
-  const awayXG = expectedGoals(params.awayAttack, params.homeDefence, false);
+  const D = computeDiff(params.homeRating, params.awayRating, params.homeMomentum, params.awayMomentum);
+  // Same formula matchOdds.ts's sampleScoreline uses internally for its
+  // Poisson means -- recomputed here (not returned by sampleScoreline)
+  // purely so callers/UI can still see an expected-goals figure.
+  const homeXG = ODDS_CONFIG.MU_BASE * Math.exp(ODDS_CONFIG.GOAL_TILT * D);
+  const awayXG = ODDS_CONFIG.MU_BASE * Math.exp(-ODDS_CONFIG.GOAL_TILT * D);
 
-  const homeGoals = samplePoisson(homeXG, rng);
-  const awayGoals = samplePoisson(awayXG, rng);
+  const { homeGoals, awayGoals } = sampleScoreline(D, rng);
 
   const events: MatchEvent[] = [
     ...generateGoalEvents(homeGoals, 'home', params.homeSquad, rng),

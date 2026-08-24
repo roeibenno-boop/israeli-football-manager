@@ -60,7 +60,29 @@ export type SlotAssignment = Record<string, string | null>; // slot key -> playe
 // --- club rating: THE club rating (0008_performance.sql) -----------------
 
 export type StartingXIEntry = { slotGroup: PlayerPosition; player: Player };
-export type ClubRating = { overall: number; attack: number; midfield: number; defence: number };
+
+// Branded so a plain number (e.g. player.overall, or ratings.ts's
+// estimateSquadRating output) cannot be passed where an effective XI
+// rating is required — this is the "assert in code" that matchOdds.ts's
+// computeDiff cannot regress to the true overall: it's a *compile* error,
+// not a runtime check, because a runtime check has no way to tell an
+// effective rating from a raw one (they're both just numbers in the same
+// range). The brand only exists at the type level (erased at runtime) and
+// is only ever produced here, by computeClubRating.
+declare const effectiveRatingBrand: unique symbol;
+export type EffectiveRatingValue = number & { readonly [effectiveRatingBrand]: true };
+
+export type EffectiveClubRating = {
+  overall: EffectiveRatingValue;
+  attack: EffectiveRatingValue;
+  midfield: EffectiveRatingValue;
+  defence: EffectiveRatingValue;
+};
+// Back-compat alias -- most existing call sites (squad screen, lineup
+// screen headers, etc.) just display these numbers and don't care that
+// they're branded (number & {brand} is still assignable anywhere a plain
+// number is expected).
+export type ClubRating = EffectiveClubRating;
 
 /**
  * The one club rating. Takes the actual starting XI — exactly 11 players,
@@ -74,7 +96,7 @@ export type ClubRating = { overall: number; attack: number; midfield: number; de
  * good or bad. Throws if it isn't exactly 11 (a lineup that isn't full
  * doesn't have a rating; the caller should ensure completeness first).
  */
-export function computeClubRating(startingXI: StartingXIEntry[]): ClubRating {
+export function computeClubRating(startingXI: StartingXIEntry[]): EffectiveClubRating {
   if (startingXI.length !== 11) {
     throw new Error(`computeClubRating requires exactly 11 players (got ${startingXI.length})`);
   }
@@ -88,10 +110,10 @@ export function computeClubRating(startingXI: StartingXIEntry[]): ClubRating {
   const fw = average(effectiveFor('FW'));
 
   return {
-    overall: Math.round(gk * 0.15 + df * 0.3 + mf * 0.3 + fw * 0.25),
-    attack: Math.round(fw),
-    midfield: Math.round(mf),
-    defence: Math.round(df),
+    overall: Math.round(gk * 0.15 + df * 0.3 + mf * 0.3 + fw * 0.25) as EffectiveRatingValue,
+    attack: Math.round(fw) as EffectiveRatingValue,
+    midfield: Math.round(mf) as EffectiveRatingValue,
+    defence: Math.round(df) as EffectiveRatingValue,
   };
 }
 
@@ -117,9 +139,12 @@ export function computeLineupRating(
   formationKey: FormationKey,
   assignment: SlotAssignment,
   playersById: Map<string, Player>
-): ClubRating {
+): EffectiveClubRating {
   const xi = startingXIFrom(formationKey, assignment, playersById);
-  if (!xi) return { overall: 0, attack: 0, midfield: 0, defence: 0 };
+  if (!xi) {
+    const zero = 0 as EffectiveRatingValue;
+    return { overall: zero, attack: zero, midfield: zero, defence: zero };
+  }
   return computeClubRating(xi);
 }
 

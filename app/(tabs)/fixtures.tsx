@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, SectionList, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -61,9 +62,15 @@ export default function FixturesScreen() {
     setLoading(false);
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  // Refetches on every focus, not just first mount -- same reasoning as
+  // the other tabs (Expo Router keeps them mounted). Matters here too:
+  // e.g. after saving a lineup elsewhere, revisiting Fixtures should still
+  // show a consistent picture.
+  useFocusEffect(
+    useCallback(() => {
+      load();
+    }, [load])
+  );
 
   const clubsById = useMemo(() => new Map(clubs.map((c) => [c.id, c])), [clubs]);
 
@@ -142,9 +149,17 @@ export default function FixturesScreen() {
         priorSeasonYellows.set(row.player_id, (priorSeasonYellows.get(row.player_id) ?? 0) + row.yellow_cards);
       }
 
+      // Matches each club has already played this season -- computed from
+      // the fixtures already loaded, no extra query needed.
+      const matchesPlayedByClub = (clubId: string) =>
+        fixtures.filter(
+          (f) => f.status === 'finished' && (f.home_club_id === clubId || f.away_club_id === clubId)
+        ).length;
+
       const allStatRows: MatchStatRow[] = [];
       const allPlayerUpdates: PlayerConditionUpdate[] = [];
       const clubRatingUpdates = new Map<string, number>();
+      const clubFormUpdates = new Map<string, { form_string: string; momentum: number }>();
 
       for (const fixture of roundFixtures) {
         const homeInputs = buildClubMatchInputs(
@@ -156,6 +171,9 @@ export default function FixturesScreen() {
           fixture.away_club_id === managedClubId ? userLineup : undefined
         );
 
+        const homeClub = clubsById.get(fixture.home_club_id);
+        const awayClub = clubsById.get(fixture.away_club_id);
+
         const result = processFixture({
           fixtureId: fixture.id,
           homeClubId: fixture.home_club_id,
@@ -166,12 +184,18 @@ export default function FixturesScreen() {
           awayFullSquad: playersByClub.get(fixture.away_club_id) ?? [],
           restDays: 7,
           priorSeasonYellows,
+          homeFormBefore: { form_string: homeClub?.form_string ?? '', momentum: homeClub?.momentum ?? 0 },
+          awayFormBefore: { form_string: awayClub?.form_string ?? '', momentum: awayClub?.momentum ?? 0 },
+          homeMatchesPlayedBefore: matchesPlayedByClub(fixture.home_club_id),
+          awayMatchesPlayedBefore: matchesPlayedByClub(fixture.away_club_id),
         });
 
         allStatRows.push(...result.statRows);
         allPlayerUpdates.push(...result.playerUpdates);
         clubRatingUpdates.set(fixture.home_club_id, result.homeClubRating);
         clubRatingUpdates.set(fixture.away_club_id, result.awayClubRating);
+        clubFormUpdates.set(fixture.home_club_id, result.homeForm);
+        clubFormUpdates.set(fixture.away_club_id, result.awayForm);
 
         const { error: fixtureUpdateError } = await supabase
           .from('fixtures')
@@ -250,9 +274,16 @@ export default function FixturesScreen() {
       }
 
       await Promise.all(
-        [...clubRatingUpdates.entries()].map(([clubId, rating]) =>
-          supabase.from('clubs').update({ current_rating: rating }).eq('id', clubId)
-        )
+        [...clubRatingUpdates.entries()].map(([clubId, rating]) => {
+          const form = clubFormUpdates.get(clubId);
+          return supabase
+            .from('clubs')
+            .update({
+              current_rating: rating,
+              ...(form ? { form_string: form.form_string, momentum: form.momentum } : {}),
+            })
+            .eq('id', clubId);
+        })
       );
 
       await load();
@@ -317,7 +348,11 @@ export default function FixturesScreen() {
               homeClub={clubsById.get(item.home_club_id)}
               awayClub={clubsById.get(item.away_club_id)}
               highlighted={item.home_club_id === managedClubId || item.away_club_id === managedClubId}
-              onPress={() => setSelectedFixture(item)}
+              onPress={() =>
+                item.status === 'finished'
+                  ? setSelectedFixture(item)
+                  : router.push({ pathname: '/match/[fixtureId]', params: { fixtureId: item.id } })
+              }
             />
           )}
         />
@@ -348,7 +383,7 @@ function MatchRow({
 }) {
   const played = fixture.status === 'finished';
   return (
-    <PressableScale style={[styles.matchRow, highlighted && styles.matchRowHighlighted]} onPress={onPress} disabled={!played}>
+    <PressableScale style={[styles.matchRow, highlighted && styles.matchRowHighlighted]} onPress={onPress}>
       <View style={styles.matchTeam}>
         <ClubCrest
           primaryColour={homeClub?.primary_colour}

@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
+import { useCallback, useMemo, useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -67,70 +68,76 @@ export default function PerformanceScreen() {
 
   const managedClubId = profile?.managed_club_id ?? null;
 
-  useEffect(() => {
-    if (!managedClubId) {
-      setLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
-
-    (async () => {
-      const { data: squad, error: playersError } = await supabase
-        .from('players')
-        .select('*')
-        .eq('club_id', managedClubId);
-      if (cancelled) return;
-      if (playersError) {
-        setError(playersError.message);
+  // Refetches on every focus, not just first mount -- see the equivalent
+  // comment on the squad screen's effect for why (Expo Router keeps tabs
+  // mounted, so this is what keeps stats current after a match is played
+  // from the Fixtures tab).
+  useFocusEffect(
+    useCallback(() => {
+      if (!managedClubId) {
         setLoading(false);
         return;
       }
-      setPlayers(squad ?? []);
+      let cancelled = false;
+      setLoading(true);
 
-      const playerIds = (squad ?? []).map((p) => p.id);
-      if (playerIds.length === 0) {
-        setLoading(false);
-        return;
-      }
+      (async () => {
+        const { data: squad, error: playersError } = await supabase
+          .from('players')
+          .select('*')
+          .eq('club_id', managedClubId);
+        if (cancelled) return;
+        if (playersError) {
+          setError(playersError.message);
+          setLoading(false);
+          return;
+        }
+        setPlayers(squad ?? []);
 
-      const { data: statRows, error: statsError } = await supabase
-        .from('player_match_stats')
-        .select('*')
-        .in('player_id', playerIds);
-      if (cancelled) return;
-      if (statsError) {
-        // Commonly means 0008_performance.sql hasn't been run yet -- degrade
-        // gracefully rather than blocking the whole screen.
-        setStats([]);
-      } else {
-        setStats(statRows ?? []);
-      }
+        const playerIds = (squad ?? []).map((p) => p.id);
+        if (playerIds.length === 0) {
+          setLoading(false);
+          return;
+        }
 
-      const fixtureIds = [...new Set((statRows ?? []).map((s) => s.fixture_id))];
-      if (fixtureIds.length > 0) {
-        const { data: fixtureRows } = await supabase.from('fixtures').select('*').in('id', fixtureIds);
-        if (!cancelled && fixtureRows) {
-          setFixtures(fixtureRows);
-          const opponentClubIds = new Set<string>();
-          for (const f of fixtureRows) {
-            opponentClubIds.add(f.home_club_id);
-            opponentClubIds.add(f.away_club_id);
-          }
-          const { data: clubRows } = await supabase.from('clubs').select('*').in('id', [...opponentClubIds]);
-          if (!cancelled && clubRows) {
-            setOpponentsById(new Map(clubRows.map((c) => [c.id, c])));
+        const { data: statRows, error: statsError } = await supabase
+          .from('player_match_stats')
+          .select('*')
+          .in('player_id', playerIds);
+        if (cancelled) return;
+        if (statsError) {
+          // Commonly means 0008_performance.sql hasn't been run yet --
+          // degrade gracefully rather than blocking the whole screen.
+          setStats([]);
+        } else {
+          setStats(statRows ?? []);
+        }
+
+        const fixtureIds = [...new Set((statRows ?? []).map((s) => s.fixture_id))];
+        if (fixtureIds.length > 0) {
+          const { data: fixtureRows } = await supabase.from('fixtures').select('*').in('id', fixtureIds);
+          if (!cancelled && fixtureRows) {
+            setFixtures(fixtureRows);
+            const opponentClubIds = new Set<string>();
+            for (const f of fixtureRows) {
+              opponentClubIds.add(f.home_club_id);
+              opponentClubIds.add(f.away_club_id);
+            }
+            const { data: clubRows } = await supabase.from('clubs').select('*').in('id', [...opponentClubIds]);
+            if (!cancelled && clubRows) {
+              setOpponentsById(new Map(clubRows.map((c) => [c.id, c])));
+            }
           }
         }
-      }
 
-      setLoading(false);
-    })();
+        setLoading(false);
+      })();
 
-    return () => {
-      cancelled = true;
-    };
-  }, [managedClubId]);
+      return () => {
+        cancelled = true;
+      };
+    }, [managedClubId])
+  );
 
   const leaderRows = useMemo(() => buildLeaderRows(stats, players), [stats, players]);
   const rowsByPlayer = useMemo(() => new Map(leaderRows.map((r) => [r.playerId, r])), [leaderRows]);

@@ -30,6 +30,13 @@ export interface Club {
   // AI clubs (nobody ever saves a lineup for them) don't get one from
   // normal gameplay alone.
   current_rating: number | null;
+
+  // Davidson match-odds model (0009_match_odds.sql). Last 5 results,
+  // oldest first / most recent last (e.g. "WWDLW"), and the momentum
+  // figure derived from it — see src/lib/matchOdds.ts's computeMomentum.
+  // Both null until the club's first fixture is played.
+  form_string: string | null;
+  momentum: number | null;
 }
 
 export type PlayerPosition = 'GK' | 'DF' | 'MF' | 'FW';

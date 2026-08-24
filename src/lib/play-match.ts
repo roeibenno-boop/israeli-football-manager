@@ -17,6 +17,7 @@
 import { accumulateFatigue, effectiveOverall, fatigueLevelForPoints, recoverFatigue, rollInjury, type FatigueLevel } from './fatigue';
 import type { FormationKey } from './formations';
 import { computeClubRating, startingXIFrom, type SlotAssignment } from './lineup';
+import { computeFormPoints, computeMomentum, type MatchResultLetter } from './matchOdds';
 import { pickManOfTheMatch, rateGoalkeeper, rateOutfieldPlayer } from './matchRating';
 import { autoPickBestXI } from './lineup';
 import { simulateMatch, type MatchEvent, type RawPlayerMatchStat, type SimPlayer } from './simulation';
@@ -103,6 +104,12 @@ export type PlayerConditionUpdate = {
   season_minutes: number;
 };
 
+export type ClubFormUpdate = {
+  /** Last 5 results, oldest first, most recent last -- e.g. "WWDLW". Truncated to 5 chars. */
+  form_string: string;
+  momentum: number;
+};
+
 export type ProcessedFixtureResult = {
   homeGoals: number;
   awayGoals: number;
@@ -112,6 +119,8 @@ export type ProcessedFixtureResult = {
   awayClubRating: number;
   statRows: MatchStatRow[];
   playerUpdates: PlayerConditionUpdate[];
+  homeForm: ClubFormUpdate;
+  awayForm: ClubFormUpdate;
 };
 
 export type ProcessFixtureParams = {
@@ -127,7 +136,21 @@ export type ProcessFixtureParams = {
   restDays?: number;
   /** Season-to-date yellow count (BEFORE this match) for players who might pick one up this match — for the 5-yellows-is-a-ban rule. Missing entries treated as 0. */
   priorSeasonYellows?: Map<string, number>;
+  /** Each club's form_string/momentum BEFORE this match (empty string / 0 for a club with no history yet). */
+  homeFormBefore: ClubFormUpdate;
+  awayFormBefore: ClubFormUpdate;
+  /** League fixtures each club has already played BEFORE this match -- computeMomentum's n is min(this, 5). */
+  homeMatchesPlayedBefore: number;
+  awayMatchesPlayedBefore: number;
 };
+
+function nextFormUpdate(before: ClubFormUpdate, matchesPlayedBefore: number, result: MatchResultLetter): ClubFormUpdate {
+  const form_string = (before.form_string + result).slice(-5);
+  const letters = form_string.split('') as MatchResultLetter[];
+  const formPoints = computeFormPoints(letters);
+  const momentum = computeMomentum(formPoints, matchesPlayedBefore + 1);
+  return { form_string, momentum };
+}
 
 function conditionUpdateFor(
   player: Player,
@@ -205,10 +228,10 @@ export function processFixture(params: ProcessFixtureParams): ProcessedFixtureRe
 
   const result = simulateMatch({
     seed: params.fixtureId,
-    homeAttack: homeRating.attack || homeRating.overall,
-    homeDefence: homeRating.defence || homeRating.overall,
-    awayAttack: awayRating.attack || awayRating.overall,
-    awayDefence: awayRating.defence || awayRating.overall,
+    homeRating: homeRating.overall,
+    awayRating: awayRating.overall,
+    homeMomentum: params.homeFormBefore.momentum,
+    awayMomentum: params.awayFormBefore.momentum,
     homeSquad: toSimSquad(params.home.assignment, homePlayersById),
     awaySquad: toSimSquad(params.away.assignment, awayPlayersById),
   });
@@ -307,6 +330,11 @@ export function processFixture(params: ProcessFixtureParams): ProcessedFixtureRe
     playerUpdates.push(update);
   }
 
+  const homeResultLetter: MatchResultLetter =
+    result.homeGoals > result.awayGoals ? 'W' : result.homeGoals < result.awayGoals ? 'L' : 'D';
+  const awayResultLetter: MatchResultLetter =
+    result.awayGoals > result.homeGoals ? 'W' : result.awayGoals < result.homeGoals ? 'L' : 'D';
+
   return {
     homeGoals: result.homeGoals,
     awayGoals: result.awayGoals,
@@ -316,6 +344,8 @@ export function processFixture(params: ProcessFixtureParams): ProcessedFixtureRe
     awayClubRating: awayRating.overall,
     statRows,
     playerUpdates,
+    homeForm: nextFormUpdate(params.homeFormBefore, params.homeMatchesPlayedBefore, homeResultLetter),
+    awayForm: nextFormUpdate(params.awayFormBefore, params.awayMatchesPlayedBefore, awayResultLetter),
   };
 }
 

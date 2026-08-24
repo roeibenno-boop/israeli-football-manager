@@ -144,6 +144,11 @@ Path alias: `@/*` resolves to `src/*` (see `tsconfig.json`), except
   rating (see "Football layer") — persisted when a lineup is saved and
   refreshed after each match played; null for a club nobody has ever
   saved a lineup for (in practice, any AI club — see below).
+- **clubs**, continued (`0009`) — `form_string` (text, `^[WDL]{0,5}$`,
+  oldest result first, newest last, capped at 5 — see "Match outcome
+  model"), `momentum` (numeric(4,2)). Both null until a club's first match
+  under the Davidson model; updated for both sides of every fixture
+  `processFixture` writes.
 - **player_match_stats** (`0008`) — one row per player per fixture they
   appeared in: `fixture_id, player_id, club_id, minutes_played, started`,
   the full counting-stats line (goals/assists/shots/passes/tackles/
@@ -172,11 +177,13 @@ Migrations so far: `0001` initial schema, `0002` seeds the 14 real clubs,
 the rating columns, `0006` adds club colours/crest initials, `0007` adds
 lineups/lineup_slots + the fixtures tactics/events columns + the fixtures
 update policy, `0008` adds player_match_stats + condition columns +
-clubs.current_rating + their write policies. `0002`/`0004` (pure data)
-were run via direct API calls (service_role key). `0001`-`0003` (DDL) were
-run via the SQL Editor, back when that was the only option; `0005` onward
-were applied directly via `scripts/run-migration.ts` (see "Migrations" in
-Conventions) once a database password became available.
+clubs.current_rating + their write policies, `0009` adds
+`clubs.form_string`/`clubs.momentum` for the Davidson match outcome model.
+`0002`/`0004` (pure data) were run via direct API calls (service_role
+key). `0001`-`0003` (DDL) were run via the SQL Editor, back when that was
+the only option; `0005` onward were applied directly via
+`scripts/run-migration.ts` (see "Migrations" in Conventions) once a
+database password became available.
 
 ## Visual identity
 
@@ -261,6 +268,15 @@ Conventions) once a database password became available.
   so it naturally rotates tired/unavailable players out.
   `shirtNumberFor(playerId)` — players have no stored squad number, so the
   lineup screen derives a stable display number from a hash of the id.
+  `computeClubRating`'s return type is `EffectiveClubRating`, whose numbers
+  are branded (`EffectiveRatingValue`, a TS nominal type — `number &
+  {readonly [brand]: true}`) so that `matchOdds.ts`'s `computeDiff` can
+  only be called with a genuine effective-XI rating, never a raw
+  `player.overall` or `estimateSquadRating` output, at compile time. There's
+  no runtime check possible here (an effective rating and a raw one are
+  both just plain numbers in the same range) — this is what "enforce it in
+  code" means when the two things you need to keep apart are structurally
+  identical.
 - `app/(tabs)/lineup.tsx` — loads the manager's most recent saved lineup
   (falls back to auto-pick if none exists, or if `lineups`/`lineup_slots`
   don't exist yet because `0007` hasn't been run — degrades gracefully
@@ -269,20 +285,90 @@ Conventions) once a database password became available.
   re-auto-picks from the full squad rather than trying to preserve
   incompatible slot mappings.
 - `src/lib/simulation.ts` — deterministic, seeded (mulberry32 PRNG +
-  FNV-1a hash of the seed, typically the fixture id). Expected goals per
-  side from attack vs. opponent defence rating (log-free ratio model, ~1.35
-  league-average goals/team, home advantage 1.12x), actual goals sampled
-  via Knuth's Poisson algorithm. Callers are expected to pass *effective*
-  (fatigue-adjusted, via `lineup.ts`'s `computeClubRating`) attack/defence
-  ratings — this file has no fatigue concept of its own, it just trusts
-  what it's given, so a tired XI genuinely creates worse chances. Goal
+  FNV-1a hash of the seed, typically the fixture id). Drives `matchOdds.ts`
+  (below) for the actual outcome/scoreline: computes `D =
+  computeDiff(homeRating, awayRating, homeMomentum, awayMomentum)`, gets
+  `{homeGoals, awayGoals}` from `sampleScoreline(D, rng)`, and separately
+  recomputes `homeXG`/`awayXG` (same mu formula `sampleScoreline` uses
+  internally) purely so the UI has an expected-goals figure to show — it's
+  display-only, not fed back into anything. Callers pass each side's
+  *effective* (fatigue-adjusted) XI rating (`lineup.ts`'s
+  `computeClubRating(...).overall`, an `EffectiveRatingValue`) plus each
+  side's momentum (`matchOdds.ts`'s `computeMomentum`) — this file has no
+  fatigue or form concept of its own, it just trusts what it's given, so a
+  tired or out-of-form XI genuinely creates fewer/worse chances. Goal
   scorers are weighted-random by `shooting` among outfield players
   (goalkeepers excluded from the pool), each goal ~75% likely to also get
   a weighted-random (by `passing`) assist. Also generates a full per-player
   stat line for both full XIs (shots/passes/tackles/duels/saves,
   consistent with the actual goals/cards in `events`) — see "Player
   condition & match performance". Pure — returns a `MatchResult`, no
-  Supabase/UI in this file.
+  Supabase/UI in this file. Known simplifications, documented rather than
+  half-implemented: no substitutions (all 11 starters play the full 90),
+  own goals and penalties always 0.
+
+## Match outcome model
+
+- `src/lib/matchOdds.ts` — the actual outcome/scoreline model: an exact
+  closed-form Davidson (1970) model with a draw category. No
+  approximations, no probability floors, no post-hoc normalisation.
+  - `computeDiff(homeRating, awayRating, homeMomentum, awayMomentum)` — `D
+    = (homeRating + HOME_ADVANTAGE + homeMomentum) - (awayRating +
+    awayMomentum)`, the model's single strength differential.
+  - `computeOutcomeProbabilities(D)` — `h = exp(LAMBDA*D/2)`, `a =
+    exp(-LAMBDA*D/2)`, denom `= h + a + NU`; `{pHome: h/denom, pDraw:
+    NU/denom, pAway: a/denom}`. Sums to exactly 1 by construction (shared
+    denominator, nothing to normalise) and every outcome is strictly
+    positive for any finite `D` (no floor needed — there's nothing to
+    floor). `CONFIG`: `LAMBDA=0.16`, `NU=0.74`, `HOME_ADVANTAGE=3`,
+    `MU_BASE=1.3`, `GOAL_TILT=0.0175`. `LAMBDA` controls how sharply the
+    favourite's win probability grows with the rating gap; `NU` is the
+    fixed "draw strength" both sides' exponential terms compete against
+    (bigger `NU` → more draws at every `D`); `HOME_ADVANTAGE` is added to
+    `D` as if the home side's rating were 3 points higher; `MU_BASE`/
+    `GOAL_TILT` set the Poisson goal means (`MU_BASE * exp(±GOAL_TILT*D)`)
+    used only for scoreline sampling and the display xG figure, not for
+    the outcome probabilities themselves (those come from `D` directly).
+  - `computeFormPoints(last5)` — W=3/D=1/L=0 over up to 5 results.
+    `computeMomentum(formPoints, matchesPlayed)` — `0.4 * (formPoints -
+    1.5 * min(matchesPlayed, 5))`; 1.5 pts/match is the neutral (all-draws)
+    expectation, so this is exactly how far above/below neutral a club's
+    recent form is, and it handles early season (fewer than 5 matches
+    played) automatically via the `min`. Five wins → exactly +3.0, five
+    losses → exactly -3.0.
+  - `sampleScoreline(D, rng)` — draws the **outcome** first from
+    `computeOutcomeProbabilities(D)`, then samples a scoreline conditioned
+    on that outcome via exact rejection sampling: repeatedly draw
+    independent Poisson(muHome)/Poisson(muAway) pairs (Knuth's algorithm)
+    and accept the first pair whose `sign(homeGoals - awayGoals)` matches
+    the drawn outcome. This is exact, not an approximation — the accepted
+    pair follows the true Poisson distribution conditioned on the outcome.
+    Capped at 200 rejections (effectively never hit at these mu values);
+    on overflow falls back to a fixed scoreline per outcome and
+    `console.warn`s, rather than looping forever or returning something
+    inconsistent with the drawn outcome.
+  - **The computed probabilities are never shown to the user anywhere in
+    the app** — no odds, no percentages. `src/components/FormGuide.tsx`
+    (`FormGuide`: W/D/L pills, green/grey/red, oldest-left; `MomentumLabel`:
+    signed number like `"+3.0"`, green/red, renders nothing at exactly
+    `0.0`) is the only outcome-adjacent thing a manager sees pre-match —
+    both are descriptive (recent results, form trend), not predictive.
+    `app/match/[fixtureId].tsx` (a modal route, tap a scheduled fixture in
+    the Fixtures tab) is the pre-match preview: both crests, both effective
+    XI ratings, both `FormGuide`s, both `MomentumLabel`s — enough to judge
+    a match without being handed the odds.
+  - Tested in `matchOdds.test.ts` (exact spec'd probability values to 4
+    decimals, sum-to-1 within 1e-12 and strict positivity for `D` in
+    [-60, 60], symmetry, momentum edge cases, a 100,000-trial check that
+    realised outcome frequencies match the formula within 0.5%) and
+    `season-simulation.test.ts` (200 simulated 26-round seasons among 14
+    clubs with a realistic rating spread — reports actual computed numbers
+    for champion mean points, title rate for the strongest squad,
+    bottom-club mean points, and the home/away win-rate gap, plus a
+    dedicated check that a fatigued XI measurably underperforms the same
+    XI fresh). Per-file convention: if any assertion in either file fails,
+    the actual numbers get reported, not silently patched by loosening the
+    assertion or adjusting `CONFIG`.
 - `src/lib/fixtures.ts` — `generateSeasonFixtures`: standard circle-method
   round-robin, doubled (home + away) — 14 clubs → 26 rounds × 7 matches =
   182 fixtures. Requires an even team count (true for our 14; throws
@@ -344,9 +430,15 @@ Conventions) once a database password became available.
   `mostCards`. "League-wide or per club" isn't a separate parameter — every
   row carries `clubId`, filter before calling.
 - `src/lib/play-match.ts`'s `processFixture` is the full per-match
-  pipeline: runs `simulation.ts` with both sides' `computeClubRating`,
-  rates every player who appeared via `matchRating.ts`, picks one overall
-  MOTM, and for **every player on both full squads** (not just the 22 who
+  pipeline: runs `simulation.ts` with both sides' `computeClubRating` and
+  each side's pre-match `form_string`/`momentum` (caller-supplied — see
+  below), rates every player who appeared via `matchRating.ts`, picks one
+  overall MOTM, works out each side's next `form_string`/`momentum` from
+  the actual result (`nextFormUpdate`, same formula as `matchOdds.ts`'s
+  `computeFormPoints`/`computeMomentum`, reimplemented locally per the
+  project's module-independence convention) and returns both as
+  `homeForm`/`awayForm`, and for **every player on both full squads** (not
+  just the 22 who
   played) works out: fatigue accumulate-or-recover, an injury roll for
   those who played (risk based on their fatigue level going *into* the
   match), a suspension decrement for anyone serving a ban who didn't play,
@@ -361,10 +453,13 @@ Conventions) once a database password became available.
 - `app/(tabs)/fixtures.tsx`'s "Play Next Match" is the orchestration: for
   the round, fetches every involved club's full squad plus season-to-date
   yellow counts (`player_match_stats` aggregated per player, needed for
-  the 5-yellows rule), calls `processFixture` per fixture, then writes
-  `player_match_stats` (batch insert), every player's condition update
-  (batched, chunks of 20 concurrent), each club's refreshed
-  `current_rating`, and finally marks the fixtures `finished`.
+  the 5-yellows rule) and current `form_string`/`momentum` (from the
+  already-loaded clubs list) plus matches-played-so-far (derived from the
+  already-loaded fixtures list), calls `processFixture` per fixture, then
+  writes `player_match_stats` (batch insert), every player's condition
+  update (batched, chunks of 20 concurrent), and each club's refreshed
+  `current_rating` **and** `form_string`/`momentum` in one combined update
+  per club, and finally marks the fixtures `finished`.
   **Not a single database transaction** — Supabase's client REST API has
   no cross-table transaction primitive; true atomicity would need a
   Postgres function (rewriting this whole pipeline in plpgsql), which is
@@ -402,6 +497,20 @@ Conventions) once a database password became available.
   centralizes this check once for all four tabs; `sign-in.tsx`/
   `pick-club.tsx` each do their own minimal check (redirect away if
   already satisfied).
+- **Expo Router's `Tabs` navigator keeps every tab screen mounted** once
+  visited — switching tabs doesn't unmount/remount, so a plain
+  `useEffect(() => { load(); }, [deps])` data fetch only ever runs once
+  per app session and goes stale (e.g. playing a match from the Fixtures
+  tab wouldn't be reflected on the Squad/Table/Performance tabs without
+  switching away and back doing nothing). All five tab screens (Squad,
+  Lineup, Performance, Fixtures, Table) fetch their data inside
+  `useFocusEffect(useCallback(() => {...}, [deps]))` from `expo-router`
+  (re-exported from `@react-navigation/native`) instead, so returning to
+  an already-mounted tab refetches. **Exception:** the lineup screen's
+  *second* effect (hydrating `assignment`/`formationKey` from a saved
+  lineup or auto-pick) deliberately stays a plain `useEffect` — converting
+  it too would clobber an in-progress, unsaved lineup edit every time the
+  manager briefly switches tabs and back.
 
 ## Conventions
 

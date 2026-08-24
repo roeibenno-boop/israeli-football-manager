@@ -1,11 +1,12 @@
-import { router } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { router, useFocusEffect } from 'expo-router';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, FlatList, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { ClubCrest } from '@/components/ClubCrest';
 import { FatigueDot } from '@/components/FatigueDot';
+import { FormGuide, MomentumLabel } from '@/components/FormGuide';
 import { OverallBadge } from '@/components/OverallBadge';
 import { PlayerDetailSheet } from '@/components/PlayerDetailSheet';
 import { PositionPill } from '@/components/PositionPill';
@@ -55,63 +56,75 @@ export default function SquadScreen() {
 
   const managedClubId = profile?.managed_club_id ?? null;
 
-  useEffect(() => {
-    if (!managedClubId) {
-      setLoading(false);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
+  // Refetches every time this tab gains focus (not just on first mount) --
+  // Expo Router keeps tab screens mounted when you switch tabs, so without
+  // this, playing a match on the Fixtures tab wouldn't be reflected here
+  // (fresh fatigue/overall/rating) until the app was reloaded.
+  useFocusEffect(
+    useCallback(() => {
+      if (!managedClubId) {
+        setLoading(false);
+        return;
+      }
+      let cancelled = false;
+      setLoading(true);
 
-    Promise.all([
-      supabase.from('clubs').select('*').eq('id', managedClubId).single(),
-      supabase.from('players').select('*').eq('club_id', managedClubId),
-    ]).then(([clubResult, playersResult]) => {
-      if (cancelled) return;
-      if (clubResult.error) setError(clubResult.error.message);
-      else setClub(clubResult.data);
-      if (playersResult.error) setError(playersResult.error.message);
-      else setPlayers(playersResult.data ?? []);
-      setLoading(false);
-    });
+      Promise.all([
+        supabase.from('clubs').select('*').eq('id', managedClubId).single(),
+        supabase.from('players').select('*').eq('club_id', managedClubId),
+      ]).then(([clubResult, playersResult]) => {
+        if (cancelled) return;
+        if (clubResult.error) setError(clubResult.error.message);
+        else setClub(clubResult.data);
+        if (playersResult.error) setError(playersResult.error.message);
+        else setPlayers(playersResult.data ?? []);
+        setLoading(false);
+      });
 
-    return () => {
-      cancelled = true;
-    };
-  }, [managedClubId]);
+      return () => {
+        cancelled = true;
+      };
+    }, [managedClubId])
+  );
 
   // Load the manager's saved lineup so the header shows the SAME rating
   // (attack/mid/def included) as the lineup screen -- "there is ONE club
   // rating". Falls back to just club.current_rating (no bars) if no
   // lineup has ever been saved yet.
-  useEffect(() => {
-    if (players.length === 0 || !session) return;
-    let cancelled = false;
+  useFocusEffect(
+    useCallback(() => {
+      if (players.length === 0 || !session) return;
+      let cancelled = false;
 
-    (async () => {
-      const { data: lineupRows } = await supabase
-        .from('lineups')
-        .select('id, formation')
-        .eq('profile_id', session.user.id)
-        .order('created_at', { ascending: false })
-        .limit(1);
-      if (cancelled || !lineupRows || lineupRows.length === 0) return;
+      (async () => {
+        const { data: lineupRows } = await supabase
+          .from('lineups')
+          .select('id, formation')
+          .eq('profile_id', session.user.id)
+          .order('created_at', { ascending: false })
+          .limit(1);
+        if (cancelled || !lineupRows || lineupRows.length === 0) return;
 
-      const { data: slotRows } = await supabase
-        .from('lineup_slots')
-        .select('slot_key, player_id')
-        .eq('lineup_id', lineupRows[0].id);
-      if (cancelled || !slotRows || slotRows.length === 0) return;
+        const { data: slotRows } = await supabase
+          .from('lineup_slots')
+          .select('slot_key, player_id')
+          .eq('lineup_id', lineupRows[0].id);
+        if (cancelled || !slotRows || slotRows.length === 0) return;
 
-      const assignment: SlotAssignment = {};
-      for (const row of slotRows) assignment[row.slot_key] = row.player_id;
-      setSavedLineup({ formation: lineupRows[0].formation as FormationKey, assignment });
-    })();
+        const assignment: SlotAssignment = {};
+        for (const row of slotRows) assignment[row.slot_key] = row.player_id;
+        setSavedLineup({ formation: lineupRows[0].formation as FormationKey, assignment });
+      })();
 
-    return () => {
-      cancelled = true;
-    };
-  }, [players.length > 0, session?.user.id]);
+      return () => {
+        cancelled = true;
+      };
+      // players.length (not `players`) so this doesn't re-run on every
+      // refetch above -- only when the squad goes from empty to non-empty,
+      // and on every focus thereafter.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [players.length > 0, session?.user.id])
+  );
 
   const playersById = useMemo(() => new Map(players.map((p) => [p.id, p])), [players]);
 
@@ -120,8 +133,9 @@ export default function SquadScreen() {
       const live = computeLineupRating(savedLineup.formation, savedLineup.assignment, playersById);
       if (live.overall > 0) return live;
     }
-    const persisted = club?.current_rating ?? 0;
-    return { overall: persisted, attack: 0, midfield: 0, defence: 0 };
+    const persisted = (club?.current_rating ?? 0) as ClubRating['overall'];
+    const zero = 0 as ClubRating['overall'];
+    return { overall: persisted, attack: zero, midfield: zero, defence: zero };
   }, [savedLineup, playersById, club?.current_rating]);
 
   const visiblePlayers = useMemo(() => {
@@ -190,8 +204,12 @@ export default function SquadScreen() {
               <Text style={styles.headerName} numberOfLines={1}>
                 {club?.name ?? '—'}
               </Text>
+              <FormGuide formString={club?.form_string ?? null} size="sm" />
             </View>
-            <OverallBadge overall={clubRating.overall > 0 ? clubRating.overall : null} size="lg" />
+            <View style={styles.ratingBlock}>
+              <OverallBadge overall={clubRating.overall > 0 ? clubRating.overall : null} size="lg" />
+              <MomentumLabel momentum={club?.momentum ?? null} />
+            </View>
           </View>
 
           {savedLineup ? (
@@ -363,6 +381,11 @@ const styles = StyleSheet.create({
   },
   headerTitleBlock: {
     flex: 1,
+    gap: spacing.xs,
+  },
+  ratingBlock: {
+    alignItems: 'center',
+    gap: 2,
   },
   headerEyebrow: {
     ...typography.eyebrow,
