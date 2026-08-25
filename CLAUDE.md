@@ -7,7 +7,10 @@ tactics, fixtures, and league progression.
 **Status:** core gameplay loop works end to end: auth → pick a club → view
 your real squad → build a lineup → play matches (simulated, generating full
 per-player stats/ratings) → watch fatigue/form/injuries evolve and the
-table update. Still missing: transfers, finances, and a cup competition.
+table update → reach the end of a season (a summary screen, then continue
+with the same club — players age a year and progress — or manage a
+different one) or restart a season from scratch. Still missing: transfers,
+finances, and a cup competition.
 
 ## Stack
 
@@ -26,34 +29,56 @@ table update. Still missing: transfers, finances, and a cup competition.
 ```
 app/
   _layout.tsx        Root layout. Dark-only (no light/dark branching) —
-                      wraps everything in AuthProvider, registers routes.
+                      wraps everything in AuthProvider, registers routes,
+                      incl. the modal routes below.
   sign-in.tsx         Email/password sign in + sign up.
-  pick-club.tsx       Grid of crest cards; claim an unmanaged club
-                      (sets profiles.managed_club_id).
+  pick-club.tsx       Grid of crest cards; claim an unmanaged club. Also
+                      the landing point for every "start a season" flow
+                      (first-ever claim, end-of-season club switch, a
+                      Restart) — see "Season lifecycle".
+  match/[fixtureId].tsx  Modal. Pre-match preview for a scheduled fixture:
+                      both crests, effective XI ratings, FormGuides,
+                      MomentumLabels — see "Match outcome model".
+  season-summary.tsx  Modal, no swipe-to-dismiss. The end-of-season screen
+                      — see "Season lifecycle".
+  settings.tsx        Modal. Currently just "Restart Season" (behind a
+                      confirmation dialog) — see "Season lifecycle".
+  club/[clubId].tsx    Modal. Read-only club page (crest/name/table
+                      position/rating/full squad by position) — opened via
+                      "View club" from the Table tab's League Table.
   (tabs)/             Route group = the bottom tab bar. Auth-gated once,
-                      here, for all four tabs (not per-screen).
+                      here, for all five tabs (not per-screen).
     _layout.tsx        Session/managed-club guard + loads the managed
                        club's colours into ClubThemeProvider.
     index.tsx          "/" — Squad: header (crest/name/rating/att-mid-def
                        bars), sortable/filterable player list, tap a
-                       player for PlayerDetailSheet. Switch Club / Sign Out.
-    lineup.tsx          Formation switcher, pitch with shirt tokens,
-                       tap-slot-then-tap-bench to swap, live rating (with
-                       delta from the previous XI), auto-pick, save.
+                       player for PlayerDetailSheet. Settings / Switch
+                       Club / Sign Out.
+    lineup.tsx          Formation switcher, pitch with shirt tokens
+                       (sized to fit the viewport, not fixed), a
+                       sortable/filterable bench with a live rating-change
+                       preview, two auto-pick modes, save — see "Football
+                       layer"'s lineup screen entry for the full rebuild.
     performance.tsx      Sortable squad stats table (+ separate GK
                        section), tap a player for PlayerMatchLogSheet.
     fixtures.tsx        Fixtures grouped by round, "Play Next Match" (runs
                        the full match-processing pipeline — see "Player
                        condition & match performance"), tap a played match
-                       for MatchTimelineSheet.
-    table.tsx           League standings, your club highlighted.
+                       for MatchTimelineSheet, tap a scheduled one for the
+                       pre-match preview. Routes to season-summary.tsx
+                       when the round it just played was the season's last.
+    table.tsx           League hub: League Table / Scorers / Rating tabs
+                       — see "Football layer"'s table screen entry for the
+                       full rebuild.
 
 src/
   components/     Shared UI. ClubCrest, OverallBadge (now fatigue-aware —
                    see below), PositionPill, StatBar, FatigueDot,
                    PressableScale (shared tap-feedback wrapper used
-                   everywhere), PlayerDetailSheet, MatchTimelineSheet,
-                   PlayerMatchLogSheet, PlaceholderScreen,
+                   everywhere), FormGuide/MomentumLabel, PlayerDetailSheet,
+                   MatchTimelineSheet, PlayerMatchLogSheet,
+                   ScorersLeadersTab/RatingLeadersTab (the Table screen's
+                   other two tabs — see "Football layer"), PlaceholderScreen,
                    club-crest-images.ts (bundled crest asset lookup, see
                    "Visual identity" below).
   theme/           Dark-only design tokens (colors incl. fatigueColors,
@@ -68,28 +93,44 @@ src/
                    matchRating.ts     1.0-10.0 post-match player ratings (pure).
                    formations.ts      formation slot maps (pure data).
                    lineup.ts          out-of-position penalties + THE club
-                                      rating (computeClubRating), auto-pick
-                                      XI (pure) — see "Football layer".
+                                      rating (computeClubRating), two
+                                      auto-pick modes (pure) — see
+                                      "Football layer".
                    simulation.ts      seeded match engine incl. full
                                       per-player stat generation (pure).
+                   matchOdds.ts       the exact closed-form Davidson match
+                                      outcome model (pure) — see "Match
+                                      outcome model".
                    fixtures.ts        round-robin season generator (pure).
                    standings.ts       league table computation (pure).
                    leaders.ts         season leaderboards from raw match
                                       stats (pure).
+                   season.ts          player aging/rating progression +
+                                      season-boundary reset defaults
+                                      (pure) — see "Season lifecycle".
+                   season-actions.ts  the season-lifecycle I/O
+                                      orchestration shared by
+                                      settings.tsx/season-summary.tsx/
+                                      pick-club.tsx — see "Season lifecycle".
                    play-match.ts      processFixture: runs simulation.ts,
                                       rates every player (matchRating.ts),
                                       picks MOTM, works out fatigue/injury/
-                                      suspension/season-stat updates for
-                                      every player on both sides (pure —
-                                      the actual Supabase orchestration
-                                      lives in app/(tabs)/fixtures.tsx).
+                                      suspension/season-stat/form-momentum
+                                      updates for every player and both
+                                      clubs (pure — the actual Supabase
+                                      orchestration lives in
+                                      app/(tabs)/fixtures.tsx).
   types/           Shared TypeScript types (index.ts mirrors the DB schema).
   data/            Static seed data (plain data, no logic) for local dev/testing.
 
 scripts/           Standalone admin scripts (run via tsx).
                    backfill-ratings.ts, generate-fixtures.ts (service_role
-                   key — data writes). run-migration.ts (database
-                   password — schema DDL; see "Migrations" below).
+                   key — data writes; superseded for in-app use by
+                   season-actions.ts's generateFixturesForSeason, which
+                   runs from a plain authenticated session and tags every
+                   fixture with a season_id — this script is still useful
+                   for direct DB repair, but doesn't set one). run-migration.ts
+                   (database password — schema DDL; see "Migrations" below).
 
 supabase/
   migrations/      Hand-written SQL migrations, applied in filename order.
@@ -126,9 +167,18 @@ Path alias: `@/*` resolves to `src/*` (see `tsconfig.json`), except
   status (scheduled|live|finished|postponed)`, plus (`0007`) `attendance`,
   `home_lineup_id`/`away_lineup_id -> lineups`, and `events` (jsonb — the
   simulated `MatchEvent[]`, persisted so re-opening a match's timeline
-  can't drift from its stored score; see "Football layer").
+  can't drift from its stored score; see "Football layer"), plus (`0010`)
+  `season_id -> seasons` (nullable — see "Season lifecycle").
 - **profiles** — `id -> auth.users, display_name, managed_club_id -> clubs,
-  cash_balance, created_at`.
+  cash_balance, created_at`, plus (`0010`) `current_season_id -> seasons`
+  (see "Season lifecycle").
+- **seasons** (`0010`) — `id, profile_id -> profiles, season_number,
+  club_id -> clubs, started_at, ended_at, final_position, final_points,
+  is_active`. One row per manager per season, including one row per club a
+  manager has ever managed across their career — `season_number` keeps
+  incrementing across a club switch (it's a career count, not reset), but
+  does reset to 1 on a Restart (a genuine do-over, not a season passing).
+  See "Season lifecycle".
 - **lineups** (`0007`) — `id, profile_id -> profiles, formation, created_at`.
   One manager can have multiple over time; the lineup screen always loads
   the most recent.
@@ -153,7 +203,8 @@ Path alias: `@/*` resolves to `src/*` (see `tsconfig.json`), except
   appeared in: `fixture_id, player_id, club_id, minutes_played, started`,
   the full counting-stats line (goals/assists/shots/passes/tackles/
   interceptions/duels/saves/cards/own_goals/penalties), `clean_sheet`,
-  `match_rating` (1.0-10.0), `motm`. `unique(fixture_id, player_id)`.
+  `match_rating` (1.0-10.0), `motm`. `unique(fixture_id, player_id)`, plus
+  (`0010`) `season_id -> seasons` (nullable — see "Season lifecycle").
 
 RLS: `clubs`, `players`, `fixtures`, `player_match_stats` are readable by
 anyone. `fixtures`, `players`, and `clubs` are also **updatable by any
@@ -165,7 +216,13 @@ policy doesn't fit; "Play Next Match" needs to be able to write match
 results and every affected player's condition from a plain user session.
 Revisit before any real multi-user use. `profiles` and `lineups`/
 `lineup_slots` are owner-only (`auth.uid() = profile_id`, `lineup_slots`
-via a join back to its parent lineup).
+via a join back to its parent lineup). `seasons` (`0010`) is owner-only the
+same way (`auth.uid() = profile_id`, select/insert/update, no delete —
+seasons are archived, never removed). `fixtures` also gained **insert** and
+**delete** policies, and `player_match_stats` a **delete** policy, both
+"any authenticated user" (`0010`) — needed so Restart/rollover can wipe and
+regenerate a season's fixture list from a plain session, same reasoning as
+every other shared-state policy on this table.
 
 `src/types/index.ts` mirrors these tables by hand. **When the schema
 changes, update both the migration and the types together** — there's no
@@ -178,12 +235,15 @@ the rating columns, `0006` adds club colours/crest initials, `0007` adds
 lineups/lineup_slots + the fixtures tactics/events columns + the fixtures
 update policy, `0008` adds player_match_stats + condition columns +
 clubs.current_rating + their write policies, `0009` adds
-`clubs.form_string`/`clubs.momentum` for the Davidson match outcome model.
-`0002`/`0004` (pure data) were run via direct API calls (service_role
-key). `0001`-`0003` (DDL) were run via the SQL Editor, back when that was
-the only option; `0005` onward were applied directly via
-`scripts/run-migration.ts` (see "Migrations" in Conventions) once a
-database password became available.
+`clubs.form_string`/`clubs.momentum` for the Davidson match outcome model,
+`0010` adds `seasons` + `profiles.current_season_id` +
+`fixtures`/`player_match_stats.season_id` + their RLS policies (requested
+as `0006_seasons.sql`; 0006 was already used — renumbered, same pattern as
+every migration since 0002). `0002`/`0004` (pure data) were run via direct
+API calls (service_role key). `0001`-`0003` (DDL) were run via the SQL
+Editor, back when that was the only option; `0005` onward were applied
+directly via `scripts/run-migration.ts` (see "Migrations" in Conventions)
+once a database password became available.
 
 ## Visual identity
 
@@ -261,11 +321,19 @@ database password became available.
   club rating: takes the actual starting XI (exactly 11 `{slotGroup,
   player}` entries, no best-11 selection — the XI you give it *is* the
   XI), same GK/DF/MF/FW weighted-mean shape as `estimateSquadRating` but
-  using effective overalls throughout. `autoPickBestXI` is a greedy
-  assignment (exact position matches by effective overall first, then
-  best-remaining-fit — not a true optimal assignment, but deterministic
-  and good enough) that also excludes injured/suspended players outright,
-  so it naturally rotates tired/unavailable players out.
+  using effective overalls throughout. Two auto-pick modes, both sharing a
+  private `greedyAssign(pool, slots)` (exact position matches by effective
+  overall first, then best-remaining-fit — not a true optimal assignment,
+  but deterministic and good enough) so they only differ in what pool they
+  hand it: `autoPickBestXI` runs it over every eligible (non-injured/
+  non-suspended) player — tired players naturally rotate out on merit
+  since a tired player's effective overall is lower, but aren't excluded
+  outright. `autoPickRotationXI` — for fixture congestion — excludes
+  'tired' players from the pool *entirely* first; if that leaves fewer
+  than 11 (a threadbare or badly-fatigued squad), the remaining slots are
+  filled from whoever's left, freshest (lowest `fatigue_points`) first,
+  tired or not, and it returns a `warning` string explaining that rather
+  than silently leaving the XI incomplete.
   `shirtNumberFor(playerId)` — players have no stored squad number, so the
   lineup screen derives a stable display number from a hash of the id.
   `computeClubRating`'s return type is `EffectiveClubRating`, whose numbers
@@ -283,7 +351,30 @@ database password became available.
   rather than erroring). Tap a starter slot to select it, then tap another
   starter (swap) or a bench player (substitute); switching formation
   re-auto-picks from the full squad rather than trying to preserve
-  incompatible slot mappings.
+  incompatible slot mappings. Rebuilt (previously a fixed-size pitch that
+  pushed the bench off-screen) around two hard constraints: the pitch is
+  sized from `useWindowDimensions()`, not a fixed height — capped at
+  55%/60% of the viewport height (mobile/web) and 520px wide, whichever is
+  smallest, with shirt tokens at 44px/52px diameter — and the screen is a
+  fixed header+pitch region above a bench region that scrolls
+  *independently* (its own `FlatList`, `flex: 1`) rather than one long
+  page scroll, so the pitch never scrolls off-screen chasing the bench.
+  The bench itself is sortable (effective overall / true overall /
+  fatigue / form / season average rating / position — `BenchSortKey`,
+  default effective overall descending) and filterable (position chips +
+  a "Fresh only" toggle); injured/suspended rows stay visible but greyed
+  and unselectable. Selecting a pitch slot re-sorts the bench to surface
+  same-position-group players first (via `positionPenalty`), and an
+  out-of-position candidate shows its exact penalty inline ("-5 out of
+  position"). Hovering (web) or press-and-holding (`onPressIn`/
+  `onHoverIn`, both wired — `PressableScale` forwards whatever handlers
+  it's given) a bench candidate while a slot is selected computes and
+  shows a live "78 → 76" rating preview in the header via a second
+  `computeLineupRating` call against the hypothetical post-swap
+  assignment, without touching the real `assignment` state until the swap
+  is actually confirmed with a tap. Auto-pick is now two buttons (Best XI
+  / Rotation); a Rotation warning (see `autoPickRotationXI` above) renders
+  as an inline banner rather than blocking anything.
 - `src/lib/simulation.ts` — deterministic, seeded (mulberry32 PRNG +
   FNV-1a hash of the seed, typically the fixture id). Drives `matchOdds.ts`
   (below) for the actual outcome/scoreline: computes `D =
@@ -381,8 +472,47 @@ database password became available.
 - `src/lib/standings.ts` — `computeStandings`: points/W/D/L/GF/GA/GD from
   finished fixtures. Tiebreakers: points → goal difference → goals for →
   club name. **Simplification:** no head-to-head sub-table, which real
-  league regulations often apply before goal difference. Tested in
+  league regulations often apply before goal difference — still true after
+  the table screen rebuild below, which reuses this same function and
+  tiebreak order for its default sort rather than adding one. Tested in
   `standings.test.ts`.
+- `app/(tabs)/table.tsx` — the league hub, three tabs (previously just a
+  bare standings list). **League Table**: `computeStandings` output, one
+  row per club — position, `ClubCrest`, full `club.name` (never
+  `short_name`), a 3px leading colour bar in the club's own
+  `primary_colour`, position-zone background tinting (top 2 "European
+  Qualification", next 4 "Playoff Split", bottom 2 "Relegation Zone" —
+  proportional to however many clubs are in the table, with a `Legend`
+  below), a movement arrow versus the previous round (computed by calling
+  `computeStandings` a second time over fixtures from before the latest
+  finished round and comparing each club's index — dash if fewer than 2
+  rounds have finished yet, i.e. nothing to compare against), and the
+  user's club highlighted in its own theme accent. Column headers are
+  tappable to re-sort (`SortKey`, three-state: desc → asc → back to the
+  league-rules default); a compact/detailed density toggle hides GF/GA/
+  W/D/L/Form (compact fits 375px with no horizontal scroll; detailed wraps
+  in a horizontal `ScrollView`, header included, so it scrolls in sync).
+  Tapping a row expands it in place (home/away W-D-L split, current streak
+  — computed from that club's actual finished fixtures, not `form_string`,
+  since a streak can run longer than the 5-match form window — top scorer,
+  `current_rating`, next fixture) with a "View Club" action to
+  `app/club/[clubId].tsx`, a read-only crest/table-position/full-squad
+  page. **Scorers**: `ScorersLeadersTab` (`src/components/`), a Goals/
+  Assists segmented control over `leaders.ts` rows sorted by that tally;
+  top 3 get a larger row + medal colour (reusing `tierColors`' gold/
+  silver/bronze), any row from the manager's own club is flagged
+  regardless of rank, secondary line is goals/90 + `penaltiesScored` (for
+  Goals) or `keyPasses` (for Assists) — both new `LeaderRow` fields (see
+  below). **Rating**: `RatingLeadersTab`, `leaders.ts`'s
+  `bestAverageRating` (min 5 apps, stated in the UI) with a position
+  filter chip row (a top goalkeeper shouldn't need scrolling past thirty
+  outfield players to find), plus a standalone "Goalkeeper of the Season"
+  card (`mostCleanSheets` over the same min-5-apps pool). Tapping a player
+  in either leaderboard opens `PlayerDetailSheet`. `leaders.ts`'s
+  `LeaderRow` gained `penaltiesScored`/`keyPasses` aggregates for this
+  (summed from `player_match_stats.penalties_scored`/`key_passes`,
+  same shape as every other field on the row) — a small, backward-
+  compatible addition, not a new source of truth.
 - `src/lib/play-match.ts` (`processFixture`) + the "Play Next Match" button
   in `app/(tabs)/fixtures.tsx`: finds the manager's next `scheduled`
   fixture, processes every fixture in that same round (not just the
@@ -456,20 +586,26 @@ database password became available.
   the 5-yellows rule) and current `form_string`/`momentum` (from the
   already-loaded clubs list) plus matches-played-so-far (derived from the
   already-loaded fixtures list), calls `processFixture` per fixture, then
-  writes `player_match_stats` (batch insert), every player's condition
-  update (batched, chunks of 20 concurrent), and each club's refreshed
-  `current_rating` **and** `form_string`/`momentum` in one combined update
-  per club, and finally marks the fixtures `finished`.
+  writes `player_match_stats` (batch insert, tagged with the manager's
+  `current_season_id`), every player's condition update (batched, chunks
+  of 20 concurrent), and each club's refreshed `current_rating` **and**
+  `form_string`/`momentum` in one combined update per club, and finally
+  marks the fixtures `finished`. Both the fixtures query this screen loads
+  and the stats it writes are scoped to `profile.current_season_id` —
+  see "Season lifecycle". If the round just played leaves no `scheduled`
+  fixtures anywhere in the season, that was the last round — routes to
+  `/season-summary` instead of just reloading in place.
   **Not a single database transaction** — Supabase's client REST API has
   no cross-table transaction primitive; true atomicity would need a
   Postgres function (rewriting this whole pipeline in plpgsql), which is
   out of scope. `player_match_stats`' `unique(fixture_id, player_id)` at
   least means a retry after a partial failure fails loudly (constraint
   violation) instead of silently double-writing stats.
-- `app/(tabs)/performance.tsx` — new tab. Sortable table (tap a stat chip)
-  for outfield players, a separate goalkeeper section (saves/clean sheets/
-  save %), built from `leaders.ts` over that club's `player_match_stats`.
-  Every row shows the fatigue dot + bracketed effective overall (via
+- `app/(tabs)/performance.tsx` — sortable table (tap a stat chip) for
+  outfield players, a separate goalkeeper section (saves/clean sheets/
+  save %), built from `leaders.ts` over that club's `player_match_stats`
+  (scoped to `profile.current_season_id` — see "Season lifecycle"). Every
+  row shows the fatigue dot + bracketed effective overall (via
   `OverallBadge`) and a form arrow (rolling `form` vs. that row's season
   average `avgRating` — up/down/flat within ±0.2). Injured/suspended
   players are visually greyed. Tap a player for `PlayerMatchLogSheet`
@@ -484,17 +620,25 @@ database password became available.
   Email) for smoother local testing.
 - On first sign-in, `useProfile` creates the user's `profiles` row
   automatically (`display_name` defaults to the email's local part).
-- `app/pick-club.tsx` lists all clubs and lets the user claim one
-  (`profiles.managed_club_id`). **Known simplification:** nothing stops two
-  accounts from claiming the same club — `profiles` RLS is owner-read-only,
-  so the client can't even see who's already claimed what. Fine for
-  single-player use.
+- `app/pick-club.tsx` lists all clubs and lets the user claim one. Claiming
+  now always starts a season (`src/lib/season-actions.ts`'s
+  `startNewSeason`) rather than just setting `managed_club_id` — see
+  "Season lifecycle" for what that entails and how the screen tells its
+  three possible entry points apart via a `mode` search param.
+  **Known simplification:** nothing stops two accounts from claiming the
+  same club — `profiles` RLS is owner-read-only, so the client can't even
+  see who's already claimed what. Fine for single-player use.
 - `app/(tabs)/index.tsx` has a **Switch Club** action (clears
-  `managed_club_id`, returns to `/pick-club`) — added after hitting this
-  gap live: there was previously no way back once a club was claimed.
+  `managed_club_id` **and** `current_season_id`, marks the abandoned
+  season inactive with no final position/points since it didn't actually
+  finish, returns to `/pick-club`) — added after hitting this gap live:
+  there was previously no way back once a club was claimed. Distinct from
+  the end-of-season "Manage a different club" offer (see "Season
+  lifecycle") — this one is available anytime, mid-season, and doesn't age
+  players, since a season didn't actually pass.
 - Auth gating: no session → `/sign-in`; session but no `managed_club_id` →
   `/pick-club`; otherwise the `(tabs)` group. `(tabs)/_layout.tsx`
-  centralizes this check once for all four tabs; `sign-in.tsx`/
+  centralizes this check once for all five tabs; `sign-in.tsx`/
   `pick-club.tsx` each do their own minimal check (redirect away if
   already satisfied).
 - **Expo Router's `Tabs` navigator keeps every tab screen mounted** once
@@ -511,6 +655,81 @@ database password became available.
   lineup or auto-pick) deliberately stays a plain `useEffect` — converting
   it too would clobber an in-progress, unsaved lineup edit every time the
   manager briefly switches tabs and back.
+
+## Season lifecycle
+
+Three ways a manager's season can end and a new one begin — a Restart, a
+natural end-of-season, or (a pre-existing feature, see above) a mid-season
+Switch Club — all funnel through the same shared plumbing rather than each
+reimplementing it:
+
+- `src/lib/season.ts` — pure. `applyAgeProgression(player)`: one year of
+  aging + rating progression, applied only at a genuine season rollover
+  (never a Restart). Three age bands: under 24 grows toward `potential`
+  (bigger steps the further below it they are, capped so nobody overshoots
+  in one season), 24-29 is a player's peak (unchanged), 30+ declines,
+  accelerating with age (30-32 mild, 33-35 moderate, 36+ steep, floored at
+  45). The growth/decline amount is a deterministic hash of the player's
+  id + new age (same approach as `ratings.ts`), not `Math.random()`, so
+  rollovers stay reproducible; attributes are re-derived from the new
+  overall via `ratings.ts`'s `deriveAttributes` rather than drifting
+  independently. `playerSeasonReset()`/`clubSeasonReset()`: the fresh-
+  season defaults every player/club is reset to at a season boundary
+  (fatigue/form/injuries/suspensions/season aggregates; form_string/
+  momentum/current_rating) — always applied, Restart or rollover alike.
+- `src/lib/season-actions.ts` — the I/O orchestration these three flows
+  share. A deliberate exception to "lib/ stays pure, I/O lives in the
+  screen" (see Conventions) — this exact sequence of writes is identical
+  across three different screens, so it lives once here instead of being
+  copy-pasted three times. `archiveSeason` marks a season row inactive/
+  ended (with a final position/points for a natural end, both null for a
+  Restart, since a wipe isn't a finish). `wipeSeasonRecord` deletes a
+  season's own fixtures + player_match_stats outright — Restart only; a
+  natural rollover keeps them (under the now-archived season_id) for
+  future career-history use. `resetLeagueState(age)` resets every player
+  and club **league-wide** (this is shared league state, not just the
+  manager's own squad — same reasoning as the RLS note above), aging
+  everyone when `age` is true. `generateFixturesForSeason(seasonId)` runs
+  `fixtures.ts`'s `generateSeasonFixtures` for every club currently in the
+  league and tags every row with `seasonId`. `startNewSeason(...)` is the
+  common tail all three flows call once they've archived/wiped whatever
+  came before: create the season row, `resetLeagueState`, generate
+  fixtures, point the profile at all of it.
+- **Restart** — `app/settings.tsx`, behind a custom confirmation dialog
+  (a plain themed overlay, not `Alert.alert` — react-native-web's Alert
+  support isn't reliable enough to build a destructive confirmation on).
+  On confirm: archives the current season (no final position/points),
+  wipes its fixtures/stats, resets league state (`age: false` — a Restart
+  undoes the *current* season, it isn't a season passing), clears
+  `managed_club_id`/`current_season_id`, and routes to
+  `/pick-club?mode=restart`. The new season (number reset to 1) and its
+  fixture list aren't created until a club is actually picked there —
+  `seasons.club_id` is `not null`, so there's nothing to create yet.
+- **End of season** — `app/season-summary.tsx`. Reached only by
+  `fixtures.tsx` routing here when a just-played round leaves no
+  `scheduled` fixtures left in the season (see "Player condition & match
+  performance"). The screen itself also guards the mid-season case: if its
+  season still has scheduled fixtures (reached via the back button or a
+  typed-in URL), it redirects to Fixtures instead of rendering the offer —
+  this, not a route guard, is what keeps "no menu entry, no deep link"
+  true. Shows final position/points, top scorer + player of the season
+  (league-wide, via `leaders.ts`), and the manager's own club's top
+  scorer/rating leader. Two paths, both archiving the season first (with
+  its real final position/points this time): **"Continue with `<club>`"**
+  calls `startNewSeason` directly with the same club and `age: true`, then
+  returns to the Squad tab. **"Manage a different club"** clears
+  `managed_club_id`/`current_season_id` and routes to
+  `/pick-club?mode=new-season` — same club-selection screen as a Restart,
+  but a different `mode`.
+- **`app/pick-club.tsx`'s `claim()`** is the landing point for all three
+  flows (plus the very first-ever club claim, which looks identical to a
+  plain Switch Club to this screen — no prior seasons exist to distinguish
+  it from). Reads `mode` from the URL: `'restart'` → season number 1, no
+  aging; `'new-season'` → previous max season number + 1, **with** aging
+  (a genuine season passed); no `mode` (first-ever claim, or the
+  pre-existing mid-season Switch Club) → previous max + 1 (or 1 if none),
+  no aging. Calls `startNewSeason` either way — the three cases only differ
+  in `seasonNumber`/`age`, not in what happens once a club's chosen.
 
 ## Conventions
 

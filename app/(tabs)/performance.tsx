@@ -67,6 +67,7 @@ export default function PerformanceScreen() {
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
 
   const managedClubId = profile?.managed_club_id ?? null;
+  const seasonId = profile?.current_season_id ?? null;
 
   // Refetches on every focus, not just first mount -- see the equivalent
   // comment on the squad screen's effect for why (Expo Router keeps tabs
@@ -74,7 +75,7 @@ export default function PerformanceScreen() {
   // from the Fixtures tab).
   useFocusEffect(
     useCallback(() => {
-      if (!managedClubId) {
+      if (!managedClubId || !seasonId) {
         setLoading(false);
         return;
       }
@@ -103,6 +104,7 @@ export default function PerformanceScreen() {
         const { data: statRows, error: statsError } = await supabase
           .from('player_match_stats')
           .select('*')
+          .eq('season_id', seasonId)
           .in('player_id', playerIds);
         if (cancelled) return;
         if (statsError) {
@@ -136,7 +138,7 @@ export default function PerformanceScreen() {
       return () => {
         cancelled = true;
       };
-    }, [managedClubId])
+    }, [managedClubId, seasonId])
   );
 
   const leaderRows = useMemo(() => buildLeaderRows(stats, players), [stats, players]);

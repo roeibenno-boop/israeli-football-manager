@@ -41,6 +41,7 @@ function makeFixture(
     home_lineup_id: null,
     away_lineup_id: null,
     events: null,
+    season_id: null,
   };
 }
 

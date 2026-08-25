@@ -180,7 +180,20 @@ export default function SquadScreen() {
     // Owner-permitted update (see "profiles are updatable by their owner" in
     // 0001_init.sql) -- no admin access needed, unlike the one-off fix that
     // unblocked this account the first time this gap was hit.
-    await supabase.from('profiles').update({ managed_club_id: null }).eq('id', session.user.id);
+    //
+    // This is a mid-season escape hatch, distinct from the end-of-season
+    // "Manage a different club" offer (app/season-summary.tsx) -- the
+    // season in progress didn't actually finish, so it's archived here
+    // with no final position/points (there's nothing to record) rather
+    // than treated as a completed one, and pick-club.tsx's claim() won't
+    // age players for it (no `mode` param).
+    if (profile?.current_season_id) {
+      await supabase
+        .from('seasons')
+        .update({ is_active: false, ended_at: new Date().toISOString() })
+        .eq('id', profile.current_season_id);
+    }
+    await supabase.from('profiles').update({ managed_club_id: null, current_season_id: null }).eq('id', session.user.id);
     router.replace('/pick-club');
   };
 
@@ -223,6 +236,10 @@ export default function SquadScreen() {
           )}
 
           <View style={styles.headerActions}>
+            <PressableScale onPress={() => router.push('/settings')}>
+              <Text style={styles.headerActionText}>Settings</Text>
+            </PressableScale>
+            <Text style={styles.headerActionDivider}>·</Text>
             <PressableScale onPress={switchClub}>
               <Text style={styles.headerActionText}>Switch Club</Text>
             </PressableScale>

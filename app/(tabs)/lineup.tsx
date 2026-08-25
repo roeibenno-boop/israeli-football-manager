@@ -1,6 +1,6 @@
 import { useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, Platform, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Line, Rect } from 'react-native-svg';
 
@@ -9,20 +9,47 @@ import { OverallBadge } from '@/components/OverallBadge';
 import { PositionPill } from '@/components/PositionPill';
 import { PressableScale } from '@/components/PressableScale';
 import { useAuth } from '@/lib/auth-context';
+import { effectiveOverall } from '@/lib/fatigue';
 import { FORMATION_KEYS, formations, type FormationKey, type FormationSlot } from '@/lib/formations';
-import { adjustedOverall, autoPickBestXI, benchPlayers, computeLineupRating, shirtNumberFor, type SlotAssignment } from '@/lib/lineup';
+import { buildLeaderRows } from '@/lib/leaders';
+import {
+  adjustedOverall,
+  autoPickBestXI,
+  autoPickRotationXI,
+  benchPlayers,
+  computeLineupRating,
+  positionPenalty,
+  shirtNumberFor,
+  type SlotAssignment,
+} from '@/lib/lineup';
 import { supabase } from '@/lib/supabase';
 import { useProfile } from '@/lib/use-profile';
 import { baseColors, radius, spacing, typography, useClubTheme } from '@/theme';
-import type { Club, Player } from '@/types';
+import type { Club, FatigueLevel, Player, PlayerMatchStat, PlayerPosition } from '@/types';
+
+type BenchSortKey = 'effective' | 'overall' | 'fatigue' | 'form' | 'rating' | 'position';
+const BENCH_SORT_OPTIONS: Array<{ key: BenchSortKey; label: string }> = [
+  { key: 'effective', label: 'Effective' },
+  { key: 'overall', label: 'Overall' },
+  { key: 'fatigue', label: 'Fatigue' },
+  { key: 'form', label: 'Form' },
+  { key: 'rating', label: 'Avg Rating' },
+  { key: 'position', label: 'Position' },
+];
+const POSITION_ORDER: Record<PlayerPosition, number> = { GK: 0, DF: 1, MF: 2, FW: 3 };
+const POSITION_FILTERS: PlayerPosition[] = ['GK', 'DF', 'MF', 'FW'];
+const FATIGUE_LABEL: Record<FatigueLevel, string> = { fresh: 'Fresh', moderate: 'Moderate', tired: 'Tired' };
 
 export default function LineupScreen() {
   const { session } = useAuth();
   const { profile } = useProfile(session);
   const theme = useClubTheme();
+  const { width: winWidth, height: winHeight } = useWindowDimensions();
+  const isWeb = Platform.OS === 'web';
 
   const [club, setClub] = useState<Club | null>(null);
   const [players, setPlayers] = useState<Player[]>([]);
+  const [stats, setStats] = useState<PlayerMatchStat[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -32,13 +59,20 @@ export default function LineupScreen() {
   const [existingLineupId, setExistingLineupId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [rotationWarning, setRotationWarning] = useState<string | null>(null);
+
+  const [benchSortKey, setBenchSortKey] = useState<BenchSortKey>('effective');
+  const [benchPositionFilter, setBenchPositionFilter] = useState<PlayerPosition | null>(null);
+  const [freshOnly, setFreshOnly] = useState(false);
+  const [previewPlayerId, setPreviewPlayerId] = useState<string | null>(null);
 
   const managedClubId = profile?.managed_club_id ?? null;
+  const seasonId = profile?.current_season_id ?? null;
 
-  // Load club + squad. Refetches on every focus, not just first mount --
-  // Expo Router keeps tabs mounted, so this is what keeps fatigue/overall
-  // fresh here after a match is played from the Fixtures tab. Note this
-  // only refreshes `players`/`club` -- it deliberately does NOT touch
+  // Load club + squad + this season's stats (for the bench's "avg rating"
+  // column). Refetches on every focus -- Expo Router keeps tabs mounted,
+  // so this is what keeps fatigue/overall fresh here after a match is
+  // played from the Fixtures tab. Deliberately does NOT touch
   // `assignment`/`formationKey` (the user's in-progress edit), which is
   // hydrated once, separately, below.
   useFocusEffect(
@@ -50,22 +84,33 @@ export default function LineupScreen() {
       let cancelled = false;
       setLoading(true);
 
-      Promise.all([
-        supabase.from('clubs').select('*').eq('id', managedClubId).single(),
-        supabase.from('players').select('*').eq('club_id', managedClubId),
-      ]).then(([clubResult, playersResult]) => {
+      (async () => {
+        const [clubRes, playersRes] = await Promise.all([
+          supabase.from('clubs').select('*').eq('id', managedClubId).single(),
+          supabase.from('players').select('*').eq('club_id', managedClubId),
+        ]);
         if (cancelled) return;
-        if (clubResult.error) setError(clubResult.error.message);
-        else setClub(clubResult.data);
-        if (playersResult.error) setError(playersResult.error.message);
-        else setPlayers(playersResult.data ?? []);
+        if (clubRes.error) setError(clubRes.error.message);
+        else setClub(clubRes.data);
+        if (playersRes.error) setError(playersRes.error.message);
+        else setPlayers(playersRes.data ?? []);
+
+        const playerIds = (playersRes.data ?? []).map((p) => p.id);
+        if (seasonId && playerIds.length > 0) {
+          const { data: statRows } = await supabase
+            .from('player_match_stats')
+            .select('*')
+            .eq('season_id', seasonId)
+            .in('player_id', playerIds);
+          if (!cancelled) setStats(statRows ?? []);
+        }
         setLoading(false);
-      });
+      })();
 
       return () => {
         cancelled = true;
       };
-    }, [managedClubId])
+    }, [managedClubId, seasonId])
   );
 
   // Once the squad is available, load a saved lineup if one exists, else
@@ -92,8 +137,6 @@ export default function LineupScreen() {
         .limit(1);
 
       if (cancelled) return;
-      // lineupError here commonly means 0007_tactics.sql hasn't been run
-      // yet (relation doesn't exist) -- degrade gracefully either way.
       if (lineupError || !lineupRows || lineupRows.length === 0) {
         fallbackToAutoPick();
         return;
@@ -126,15 +169,30 @@ export default function LineupScreen() {
 
   const playersById = useMemo(() => new Map(players.map((p) => [p.id, p])), [players]);
   const bench = useMemo(() => benchPlayers(players, assignment), [players, assignment]);
+  const avgRatingByPlayer = useMemo(() => {
+    const rows = buildLeaderRows(stats, players);
+    return new Map(rows.map((r) => [r.playerId, r.avgRating]));
+  }, [stats, players]);
+
   const rating = useMemo(
     () => computeLineupRating(formationKey, assignment, playersById),
     [formationKey, assignment, playersById]
   );
   const slots = formations[formationKey];
+  const selectedSlotGroup = selectedSlot ? slots.find((s) => s.key === selectedSlot)?.group ?? null : null;
 
-  // Delta from the previous XI -- so the cost of resting a tired star (or
-  // any other swap) is immediately visible. null until there's a "before"
-  // to compare against (i.e. not shown on first load).
+  // Live preview: while a slot is selected and the user is hovering/
+  // long-pressing a bench candidate, show what the club rating would
+  // become if that swap were made -- before it's confirmed.
+  const previewRating = useMemo(() => {
+    if (!selectedSlot || !previewPlayerId) return null;
+    const previewAssignment = { ...assignment, [selectedSlot]: previewPlayerId };
+    const preview = computeLineupRating(formationKey, previewAssignment, playersById);
+    return preview.overall > 0 ? preview.overall : null;
+  }, [selectedSlot, previewPlayerId, assignment, formationKey, playersById]);
+
+  // Delta from the previous saved XI -- so the cost of resting a tired star
+  // (or any other swap) is immediately visible once it's actually applied.
   const previousOverallRef = useRef<number | null>(null);
   const [ratingDelta, setRatingDelta] = useState<number | null>(null);
   useEffect(() => {
@@ -149,14 +207,24 @@ export default function LineupScreen() {
     setFormationKey(key);
     setAssignment(autoPickBestXI(players, key));
     setSelectedSlot(null);
+    setRotationWarning(null);
   };
 
-  const onAutoPick = () => {
+  const onAutoPickBest = () => {
     setAssignment(autoPickBestXI(players, formationKey));
     setSelectedSlot(null);
+    setRotationWarning(null);
+  };
+
+  const onAutoPickRotation = () => {
+    const result = autoPickRotationXI(players, formationKey);
+    setAssignment(result.assignment);
+    setSelectedSlot(null);
+    setRotationWarning(result.warning);
   };
 
   const onTapSlot = (slotKey: string) => {
+    setRotationWarning(null);
     if (selectedSlot === slotKey) {
       setSelectedSlot(null);
       return;
@@ -173,7 +241,46 @@ export default function LineupScreen() {
     if (!selectedSlot) return;
     setAssignment((prev) => ({ ...prev, [selectedSlot]: playerId }));
     setSelectedSlot(null);
+    setPreviewPlayerId(null);
   };
+
+  const isUnavailable = (player: Player): boolean => {
+    const today = new Date().toISOString().slice(0, 10);
+    const injured = player.injured_until != null && player.injured_until >= today;
+    return injured || (player.suspended_matches ?? 0) > 0;
+  };
+
+  const visibleBench = useMemo(() => {
+    let list = bench;
+    if (benchPositionFilter) list = list.filter((p) => p.position === benchPositionFilter);
+    if (freshOnly) list = list.filter((p) => p.fatigue_level === 'fresh');
+
+    const sortValue = (p: Player): number => {
+      switch (benchSortKey) {
+        case 'effective':
+          return effectiveOverall(p.overall ?? 0, p.fatigue_level ?? 'fresh');
+        case 'overall':
+          return p.overall ?? 0;
+        case 'fatigue':
+          return -(p.fatigue_points ?? 0); // freshest (lowest points) first
+        case 'form':
+          return p.form ?? 0;
+        case 'rating':
+          return avgRatingByPlayer.get(p.id) ?? 0;
+        case 'position':
+          return -POSITION_ORDER[p.position];
+      }
+    };
+
+    const sorted = [...list].sort((a, b) => sortValue(b) - sortValue(a));
+
+    if (!selectedSlotGroup) return sorted;
+    // A slot is selected -- surface suited players first (same position
+    // group), then everyone else, preserving the chosen sort within each.
+    const suited = sorted.filter((p) => positionPenalty(selectedSlotGroup, p.position) === 0);
+    const others = sorted.filter((p) => positionPenalty(selectedSlotGroup, p.position) !== 0);
+    return [...suited, ...others];
+  }, [bench, benchPositionFilter, freshOnly, benchSortKey, avgRatingByPlayer, selectedSlotGroup]);
 
   const saveLineup = async () => {
     if (!session) return;
@@ -226,6 +333,13 @@ export default function LineupScreen() {
     }
   };
 
+  // --- sizing: pitch capped at 55%/60% viewport height (mobile/web), 520px wide max ---
+  const pitchHeightCap = winHeight * (isWeb ? 0.6 : 0.55);
+  const pitchWidthFromHeight = pitchHeightCap / (130 / 100);
+  const pitchWidth = Math.max(200, Math.min(520, winWidth - spacing.lg * 2, pitchWidthFromHeight));
+  const pitchHeight = pitchWidth * (130 / 100);
+  const tokenSize = isWeb ? 52 : 44;
+
   if (loading) {
     return (
       <View style={styles.container}>
@@ -237,103 +351,227 @@ export default function LineupScreen() {
   return (
     <View style={styles.container}>
       <SafeAreaView style={styles.safeArea} edges={['top']}>
-        <ScrollView contentContainerStyle={styles.scrollContent}>
-          <View style={styles.topRow}>
-            <View style={styles.topRowText}>
-              <Text style={styles.eyebrow}>Lineup</Text>
-              <Text style={styles.title} numberOfLines={1}>
-                {club?.name ?? '—'}
-              </Text>
-            </View>
-            <View style={styles.ratingBlock}>
+        <View style={styles.topRow}>
+          <View style={styles.topRowText}>
+            <Text style={styles.eyebrow}>Lineup</Text>
+            <Text style={styles.title} numberOfLines={1}>
+              {club?.name ?? '—'}
+            </Text>
+          </View>
+          <View style={styles.ratingBlock}>
+            {previewRating != null ? (
+              <View style={styles.previewRow}>
+                <OverallBadge overall={rating.overall > 0 ? rating.overall : null} size="md" />
+                <Text style={styles.previewArrow}>→</Text>
+                <OverallBadge overall={previewRating} size="md" />
+              </View>
+            ) : (
               <OverallBadge overall={rating.overall > 0 ? rating.overall : null} size="lg" />
-              {ratingDelta != null && ratingDelta !== 0 && (
-                <Text style={[styles.ratingDelta, { color: ratingDelta > 0 ? '#3ECF6B' : '#F2544C' }]}>
-                  {ratingDelta > 0 ? '▲' : '▼'}
-                  {Math.abs(ratingDelta)}
-                </Text>
-              )}
+            )}
+            {ratingDelta != null && ratingDelta !== 0 && previewRating == null && (
+              <Text style={[styles.ratingDelta, { color: ratingDelta > 0 ? '#3ECF6B' : '#F2544C' }]}>
+                {ratingDelta > 0 ? '▲' : '▼'}
+                {Math.abs(ratingDelta)}
+              </Text>
+            )}
+          </View>
+        </View>
+
+        {error && <Text style={styles.error}>{error}</Text>}
+
+        <View style={styles.formationRow}>
+          {FORMATION_KEYS.map((key) => (
+            <PressableScale
+              key={key}
+              onPress={() => switchFormation(key)}
+              style={[
+                styles.formationChip,
+                key === formationKey && { backgroundColor: theme.accent, borderColor: theme.accent },
+              ]}>
+              <Text style={[styles.formationChipText, key === formationKey && styles.formationChipTextActive]}>
+                {key}
+              </Text>
+            </PressableScale>
+          ))}
+        </View>
+
+        <View style={[styles.pitchWrapper, { width: pitchWidth, height: pitchHeight }]}>
+          <Pitch primaryColour={club?.primary_colour} />
+          {slots.map((slot) => {
+            const playerId = assignment[slot.key];
+            const player = playerId ? playersById.get(playerId) : undefined;
+            return (
+              <ShirtToken
+                key={slot.key}
+                slot={slot}
+                player={player}
+                selected={selectedSlot === slot.key}
+                accent={theme.accent}
+                tokenSize={tokenSize}
+                onPress={() => onTapSlot(slot.key)}
+              />
+            );
+          })}
+        </View>
+
+        <View style={styles.actionsRow}>
+          <PressableScale style={styles.secondaryButtonSmall} onPress={onAutoPickBest}>
+            <Text style={styles.secondaryButtonSmallText}>Best XI</Text>
+          </PressableScale>
+          <PressableScale style={styles.secondaryButtonSmall} onPress={onAutoPickRotation}>
+            <Text style={styles.secondaryButtonSmallText}>Rotation</Text>
+          </PressableScale>
+          <PressableScale
+            style={[styles.primaryButton, { backgroundColor: theme.accent }]}
+            onPress={saveLineup}
+            disabled={saving}>
+            {saving ? (
+              <ActivityIndicator color={baseColors.textInverse} />
+            ) : (
+              <Text style={styles.primaryButtonText}>Save</Text>
+            )}
+          </PressableScale>
+        </View>
+        {rotationWarning && <Text style={styles.warning}>{rotationWarning}</Text>}
+        {saveMessage && <Text style={styles.saveMessage}>{saveMessage}</Text>}
+
+        <View style={styles.benchSection}>
+          <View style={styles.benchControls}>
+            <Text style={styles.benchLabel}>
+              Bench{selectedSlot ? ` — tap a player to fill ${selectedSlot}` : ''}
+            </Text>
+            <View style={styles.chipRow}>
+              <FilterChip label="All" active={benchPositionFilter == null} onPress={() => setBenchPositionFilter(null)} />
+              {POSITION_FILTERS.map((pos) => (
+                <FilterChip
+                  key={pos}
+                  label={pos}
+                  active={benchPositionFilter === pos}
+                  onPress={() => setBenchPositionFilter(pos)}
+                />
+              ))}
+              <FilterChip label="Fresh only" active={freshOnly} onPress={() => setFreshOnly((v) => !v)} />
+            </View>
+            <View style={styles.chipRow}>
+              {BENCH_SORT_OPTIONS.map((opt) => (
+                <FilterChip
+                  key={opt.key}
+                  label={opt.label}
+                  active={benchSortKey === opt.key}
+                  onPress={() => setBenchSortKey(opt.key)}
+                />
+              ))}
             </View>
           </View>
 
-          {error && <Text style={styles.error}>{error}</Text>}
-
-          <View style={styles.formationRow}>
-            {FORMATION_KEYS.map((key) => (
-              <PressableScale
-                key={key}
-                onPress={() => switchFormation(key)}
-                style={[
-                  styles.formationChip,
-                  key === formationKey && { backgroundColor: theme.accent, borderColor: theme.accent },
-                ]}>
-                <Text style={[styles.formationChipText, key === formationKey && styles.formationChipTextActive]}>
-                  {key}
-                </Text>
-              </PressableScale>
-            ))}
-          </View>
-
-          <View style={styles.pitchWrapper}>
-            <Pitch primaryColour={club?.primary_colour} />
-            {slots.map((slot) => {
-              const playerId = assignment[slot.key];
-              const player = playerId ? playersById.get(playerId) : undefined;
-              return (
-                <ShirtToken
-                  key={slot.key}
-                  slot={slot}
-                  player={player}
-                  selected={selectedSlot === slot.key}
-                  accent={theme.accent}
-                  onPress={() => onTapSlot(slot.key)}
-                />
-              );
-            })}
-          </View>
-
-          <View style={styles.actionsRow}>
-            <PressableScale style={styles.secondaryButton} onPress={onAutoPick}>
-              <Text style={styles.secondaryButtonText}>Auto-Pick Best XI</Text>
-            </PressableScale>
-            <PressableScale
-              style={[styles.primaryButton, { backgroundColor: theme.accent }]}
-              onPress={saveLineup}
-              disabled={saving}>
-              {saving ? (
-                <ActivityIndicator color={baseColors.textInverse} />
-              ) : (
-                <Text style={styles.primaryButtonText}>Save Lineup</Text>
-              )}
-            </PressableScale>
-          </View>
-          {saveMessage && <Text style={styles.saveMessage}>{saveMessage}</Text>}
-
-          <Text style={styles.benchLabel}>
-            Bench{selectedSlot ? ` — tap a player to fill ${selectedSlot}` : ''}
-          </Text>
-          <View style={styles.benchList}>
-            {bench.map((player) => (
-              <PressableScale
-                key={player.id}
-                style={[styles.benchRow, !selectedSlot && styles.benchRowInactive]}
-                onPress={() => onTapBench(player.id)}
-                disabled={!selectedSlot}>
-                <OverallBadge overall={player.overall} fatigueLevel={player.fatigue_level} size="sm" />
-                <View style={styles.benchInfo}>
-                  <View style={styles.benchNameRow}>
-                    <FatigueDot level={player.fatigue_level} />
-                    <Text style={styles.benchName} numberOfLines={1}>
-                      {player.full_name}
-                    </Text>
-                  </View>
-                  <PositionPill position={player.position} size="sm" />
-                </View>
-              </PressableScale>
-            ))}
-          </View>
-        </ScrollView>
+          <FlatList
+            data={visibleBench}
+            keyExtractor={(p) => p.id}
+            contentContainerStyle={styles.benchList}
+            style={styles.benchFlatList}
+            renderItem={({ item }) => (
+              <BenchRow
+                player={item}
+                avgRating={avgRatingByPlayer.get(item.id) ?? null}
+                unavailable={isUnavailable(item)}
+                selectable={selectedSlot != null}
+                penalty={selectedSlotGroup ? positionPenalty(selectedSlotGroup, item.position) : 0}
+                effective={
+                  selectedSlotGroup ? adjustedOverall(item, selectedSlotGroup) : effectiveOverall(item.overall ?? 0, item.fatigue_level ?? 'fresh')
+                }
+                onPress={() => onTapBench(item.id)}
+                onPreviewStart={() => selectedSlot && setPreviewPlayerId(item.id)}
+                onPreviewEnd={() => setPreviewPlayerId((prev) => (prev === item.id ? null : prev))}
+              />
+            )}
+          />
+        </View>
       </SafeAreaView>
+    </View>
+  );
+}
+
+function FilterChip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
+  return (
+    <PressableScale onPress={onPress} style={[styles.chip, active && styles.chipActive]}>
+      <Text style={[styles.chipText, active && styles.chipTextActive]}>{label}</Text>
+    </PressableScale>
+  );
+}
+
+function BenchRow({
+  player,
+  avgRating,
+  unavailable,
+  selectable,
+  penalty,
+  effective,
+  onPress,
+  onPreviewStart,
+  onPreviewEnd,
+}: {
+  player: Player;
+  avgRating: number | null;
+  unavailable: boolean;
+  selectable: boolean;
+  penalty: number;
+  effective: number;
+  onPress: () => void;
+  onPreviewStart: () => void;
+  onPreviewEnd: () => void;
+}) {
+  const disabled = unavailable || !selectable;
+
+  return (
+    <PressableScale
+      style={[styles.benchRow, disabled && styles.benchRowInactive]}
+      onPress={onPress}
+      disabled={disabled}
+      onPressIn={onPreviewStart}
+      onPressOut={onPreviewEnd}
+      onHoverIn={onPreviewStart}
+      onHoverOut={onPreviewEnd}>
+      <OverallBadge overall={player.overall} fatigueLevel={player.fatigue_level} size="sm" />
+      <View style={styles.benchInfo}>
+        <View style={styles.benchNameRow}>
+          <FatigueDot level={player.fatigue_level} />
+          <Text style={styles.benchName} numberOfLines={1}>
+            {player.full_name}
+          </Text>
+          <PositionPill position={player.position} size="sm" />
+        </View>
+        <View style={styles.benchMetaRow}>
+          <Text style={styles.benchMetaText}>{FATIGUE_LABEL[player.fatigue_level]}</Text>
+          <Text style={styles.benchMetaDivider}>·</Text>
+          <PlayerFormTrend rating={player.form} />
+          {unavailable && (
+            <Text style={styles.unavailableText}>
+              {player.injured_until && player.injured_until >= new Date().toISOString().slice(0, 10) ? 'Injured' : 'Suspended'}
+            </Text>
+          )}
+          {!unavailable && penalty !== 0 && <Text style={styles.penaltyText}>{penalty} out of position</Text>}
+        </View>
+      </View>
+      <View style={styles.benchRight}>
+        <Text style={styles.benchEffective}>Eff {effective}</Text>
+        <Text style={styles.benchRating}>{avgRating != null ? avgRating.toFixed(1) : '—'} avg</Text>
+      </View>
+    </PressableScale>
+  );
+}
+
+/** A player's own rolling `form` rating (0-10), rendered as a single small
+ * colour-coded dot -- players don't have a per-match W/D/L history the way
+ * clubs do (FormGuide), only this one rolling number, so this is a
+ * deliberately simpler indicator, not a reuse of FormGuide. */
+function PlayerFormTrend({ rating }: { rating: number | null }) {
+  if (rating == null) return <Text style={styles.benchMetaText}>No form yet</Text>;
+  const tier = rating >= 7 ? 'gold' : rating >= 5.5 ? 'bronze' : 'grey';
+  const color = tier === 'gold' ? '#3ECF6B' : tier === 'bronze' ? '#F2A93B' : '#F2544C';
+  return (
+    <View style={styles.formDotRow} accessibilityLabel={`Form rating ${rating.toFixed(1)}`}>
+      <View style={[styles.formDot, { backgroundColor: color }]} />
+      <Text style={styles.benchMetaText}>{rating.toFixed(1)}</Text>
     </View>
   );
 }
@@ -358,24 +596,44 @@ function ShirtToken({
   player,
   selected,
   accent,
+  tokenSize,
   onPress,
 }: {
   slot: FormationSlot;
   player: Player | undefined;
   selected: boolean;
   accent: string;
+  tokenSize: number;
   onPress: () => void;
 }) {
   const outOfPosition = player != null && player.position !== slot.group;
   const borderColor = selected ? '#FFFFFF' : outOfPosition ? '#F2C94C' : 'transparent';
+  const wrapperWidth = tokenSize + 24;
 
   return (
-    <View style={[styles.tokenWrapper, { left: `${slot.x}%`, top: `${100 - slot.y}%` }]}>
-      <PressableScale onPress={onPress} style={[styles.token, { backgroundColor: accent, borderColor }]}>
-        <Text style={styles.tokenNumber}>{player ? shirtNumberFor(player.id) : '–'}</Text>
+    <View
+      style={[
+        styles.tokenWrapper,
+        {
+          left: `${slot.x}%`,
+          top: `${100 - slot.y}%`,
+          width: wrapperWidth,
+          marginLeft: -wrapperWidth / 2,
+          marginTop: -(tokenSize / 2 + 8),
+        },
+      ]}>
+      <PressableScale
+        onPress={onPress}
+        style={[
+          styles.token,
+          { width: tokenSize, height: tokenSize, borderRadius: tokenSize / 2, backgroundColor: accent, borderColor },
+        ]}>
+        <Text style={[styles.tokenNumber, { fontSize: tokenSize * 0.38 }]}>
+          {player ? shirtNumberFor(player.id) : '–'}
+        </Text>
         {player && (
           <View style={styles.tokenFatigueDot}>
-            <FatigueDot level={player.fatigue_level} size={7} />
+            <FatigueDot level={player.fatigue_level} size={Math.round(tokenSize * 0.2)} />
           </View>
         )}
       </PressableScale>
@@ -398,15 +656,12 @@ const styles = StyleSheet.create({
   spinner: {
     marginTop: spacing.xxl,
   },
-  scrollContent: {
-    padding: spacing.lg,
-    gap: spacing.lg,
-    paddingBottom: spacing.xxl,
-  },
   topRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.md,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.sm,
   },
   topRowText: {
     flex: 1,
@@ -423,6 +678,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 2,
   },
+  previewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  previewArrow: {
+    ...typography.bodyBold,
+    color: baseColors.textSecondary,
+  },
   ratingDelta: {
     fontSize: 12,
     fontWeight: '800',
@@ -430,15 +694,18 @@ const styles = StyleSheet.create({
   error: {
     ...typography.body,
     color: '#F2544C',
+    paddingHorizontal: spacing.lg,
   },
   formationRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: spacing.xs,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xs,
   },
   formationChip: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
     borderRadius: radius.pill,
     borderWidth: 1,
     backgroundColor: baseColors.surfaceElevated,
@@ -446,31 +713,27 @@ const styles = StyleSheet.create({
   },
   formationChipText: {
     ...typography.caption,
+    fontSize: 10,
     color: baseColors.textSecondary,
   },
   formationChipTextActive: {
     color: baseColors.textInverse,
   },
   pitchWrapper: {
-    aspectRatio: 100 / 130,
+    alignSelf: 'center',
     borderRadius: radius.lg,
     overflow: 'hidden',
     borderWidth: 1,
     borderColor: baseColors.border,
     position: 'relative',
+    marginTop: spacing.xs,
   },
   tokenWrapper: {
     position: 'absolute',
-    width: 56,
-    marginLeft: -28,
-    marginTop: -22,
     alignItems: 'center',
     gap: 2,
   },
   token: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
     borderWidth: 2,
     alignItems: 'center',
     justifyContent: 'center',
@@ -481,7 +744,6 @@ const styles = StyleSheet.create({
     right: -1,
   },
   tokenNumber: {
-    fontSize: 14,
     fontWeight: '800',
     color: baseColors.textInverse,
   },
@@ -500,41 +762,91 @@ const styles = StyleSheet.create({
   },
   actionsRow: {
     flexDirection: 'row',
-    gap: spacing.sm,
+    gap: spacing.xs,
+    paddingHorizontal: spacing.lg,
+    paddingTop: spacing.xs,
   },
-  secondaryButton: {
+  secondaryButtonSmall: {
     flex: 1,
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.sm,
     borderRadius: radius.md,
     borderWidth: 1,
     borderColor: baseColors.borderStrong,
     alignItems: 'center',
   },
-  secondaryButtonText: {
-    ...typography.bodyBold,
+  secondaryButtonSmallText: {
+    ...typography.caption,
+    fontWeight: '800',
     color: baseColors.textPrimary,
   },
   primaryButton: {
     flex: 1,
-    paddingVertical: spacing.md,
+    paddingVertical: spacing.sm,
     borderRadius: radius.md,
     alignItems: 'center',
   },
   primaryButtonText: {
-    ...typography.bodyBold,
+    ...typography.caption,
+    fontWeight: '800',
     color: baseColors.textInverse,
+  },
+  warning: {
+    ...typography.caption,
+    color: '#F2A93B',
+    textAlign: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingTop: 4,
   },
   saveMessage: {
     ...typography.caption,
     color: baseColors.textSecondary,
     textAlign: 'center',
+    paddingTop: 4,
+  },
+  benchSection: {
+    flex: 1,
+    marginTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+  },
+  benchControls: {
+    gap: spacing.xs,
+    paddingBottom: spacing.sm,
   },
   benchLabel: {
     ...typography.eyebrow,
     color: baseColors.textTertiary,
   },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  chip: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    backgroundColor: baseColors.surfaceElevated,
+    borderColor: baseColors.border,
+  },
+  chipActive: {
+    backgroundColor: baseColors.surfacePressed,
+    borderColor: baseColors.borderStrong,
+  },
+  chipText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: baseColors.textSecondary,
+  },
+  chipTextActive: {
+    color: baseColors.textPrimary,
+  },
+  benchFlatList: {
+    flex: 1,
+  },
   benchList: {
     gap: spacing.sm,
+    paddingBottom: spacing.xxl,
   },
   benchRow: {
     flexDirection: 'row',
@@ -547,7 +859,7 @@ const styles = StyleSheet.create({
     padding: spacing.md,
   },
   benchRowInactive: {
-    opacity: 0.6,
+    opacity: 0.5,
   },
   benchInfo: {
     flex: 1,
@@ -561,5 +873,56 @@ const styles = StyleSheet.create({
   benchName: {
     ...typography.bodyBold,
     color: baseColors.textPrimary,
+    flexShrink: 1,
+  },
+  benchMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    flexWrap: 'wrap',
+  },
+  benchMetaText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: baseColors.textTertiary,
+  },
+  benchMetaDivider: {
+    ...typography.caption,
+    fontSize: 10,
+    color: baseColors.textTertiary,
+  },
+  formDotRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+  },
+  formDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  unavailableText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: '#F2544C',
+  },
+  penaltyText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: '#F2C94C',
+  },
+  benchRight: {
+    alignItems: 'flex-end',
+    gap: 2,
+  },
+  benchEffective: {
+    ...typography.numericMD,
+    fontSize: 13,
+    color: baseColors.textPrimary,
+  },
+  benchRating: {
+    ...typography.caption,
+    fontSize: 10,
+    color: baseColors.textTertiary,
   },
 });

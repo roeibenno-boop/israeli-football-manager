@@ -109,6 +109,12 @@ export interface Fixture {
   away_lineup_id: UUID | null;
   /** MatchEvent[] from src/lib/simulation.ts, set once the fixture is simulated. */
   events: unknown[] | null;
+
+  // Season lifecycle (0010_seasons.sql). Nullable -- pre-0010 rows that
+  // predate seasons entirely stay null if the backfill had nothing to
+  // attach them to (see the migration). Every fixture generated from here
+  // on always gets one (src/lib/season-actions.ts).
+  season_id: UUID | null;
 }
 
 export interface Profile {
@@ -118,6 +124,28 @@ export interface Profile {
   managed_club_id: UUID | null;
   cash_balance: number;
   created_at: ISOTimestamp;
+
+  // Season lifecycle (0010_seasons.sql). The manager's currently-active
+  // season -- null between "picked/ended a season" and "claimed a club",
+  // i.e. exactly while app/pick-club.tsx is showing.
+  current_season_id: UUID | null;
+}
+
+// Season lifecycle (0010_seasons.sql)
+
+export interface Season {
+  id: UUID;
+  profile_id: UUID;
+  /** 1, 2, 3, ... -- a manager's career count, carried across club switches (see CLAUDE.md's "Season lifecycle"). */
+  season_number: number;
+  club_id: UUID;
+  started_at: ISOTimestamp;
+  /** Set when the season is archived (a natural end, a club switch, or a Restart). */
+  ended_at: ISOTimestamp | null;
+  /** Final league position (1-14). Null for a Restart (there's no natural finish to record) or a season still in progress. */
+  final_position: number | null;
+  final_points: number | null;
+  is_active: boolean;
 }
 
 // Tactics (0007_tactics.sql)
@@ -169,4 +197,7 @@ export interface PlayerMatchStat {
   penalties_missed: number;
   match_rating: number | null;
   motm: boolean;
+
+  // Season lifecycle (0010_seasons.sql). See Fixture.season_id.
+  season_id: UUID | null;
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import { adjustedOverall, computeClubRating, positionPenalty, type StartingXIEntry } from './lineup';
-import type { Player } from '../types';
+import { adjustedOverall, autoPickRotationXI, computeClubRating, positionPenalty, type StartingXIEntry } from './lineup';
+import type { FatigueLevel, Player, PlayerPosition } from '../types';
 
 function makePlayer(overrides: Partial<Player> = {}): Player {
   return {
@@ -114,5 +114,61 @@ describe('computeClubRating', () => {
     ];
     // 70, 70, 70-5(adjacent) = 65 -> average 68.33 -> rounds to 68.
     expect(computeClubRating(base).attack).toBe(68);
+  });
+});
+
+describe('autoPickRotationXI', () => {
+  // A comfortably-sized 4-3-3-worth squad: 3 GK, 6 DF, 5 MF, 5 FW.
+  function makeSquad(fatigueFor: (position: PlayerPosition, index: number) => FatigueLevel): Player[] {
+    const counts: Record<PlayerPosition, number> = { GK: 3, DF: 6, MF: 5, FW: 5 };
+    const players: Player[] = [];
+    (Object.keys(counts) as PlayerPosition[]).forEach((position) => {
+      for (let i = 0; i < counts[position]; i++) {
+        players.push(
+          makePlayer({
+            id: `${position}-${i}`,
+            position,
+            overall: 70,
+            fatigue_level: fatigueFor(position, i),
+          })
+        );
+      }
+    });
+    return players;
+  }
+
+  it('excludes tired players and fills the XI cleanly, no warning, when enough non-tired players exist', () => {
+    const squad = makeSquad((_, i) => (i === 0 ? 'tired' : 'fresh')); // one tired player per group, plenty fresh left
+    const result = autoPickRotationXI(squad, '4-3-3');
+
+    expect(result.warning).toBeNull();
+    const usedIds = Object.values(result.assignment).filter((id): id is string => id != null);
+    expect(usedIds).toHaveLength(11);
+    for (const id of usedIds) {
+      const player = squad.find((p) => p.id === id)!;
+      expect(player.fatigue_level).not.toBe('tired');
+    }
+  });
+
+  it('falls back to the freshest available and warns when there are not enough non-tired players', () => {
+    // Every outfield player tired except a bare handful -- not enough
+    // non-tired DF/MF/FW to fill 4-3-3 without dipping into the tired pool.
+    const squad = makeSquad((position, i) => {
+      if (position === 'GK') return 'fresh';
+      return i === 0 ? 'moderate' : 'tired';
+    });
+    const result = autoPickRotationXI(squad, '4-3-3');
+
+    expect(result.warning).not.toBeNull();
+    expect(result.warning).toMatch(/freshest players still available/);
+    const usedIds = Object.values(result.assignment).filter((id): id is string => id != null);
+    expect(usedIds).toHaveLength(11); // still fills the XI rather than leaving gaps
+  });
+
+  it('is deterministic -- same squad, same result', () => {
+    const squad = makeSquad((_, i) => (i === 0 ? 'tired' : 'fresh'));
+    const a = autoPickRotationXI(squad, '4-3-3');
+    const b = autoPickRotationXI(squad, '4-3-3');
+    expect(a).toEqual(b);
   });
 });

@@ -42,8 +42,13 @@ export default function FixturesScreen() {
   const [selectedFixture, setSelectedFixture] = useState<Fixture | null>(null);
 
   const managedClubId = profile?.managed_club_id ?? null;
+  const seasonId = profile?.current_season_id ?? null;
 
   const load = useCallback(async () => {
+    if (!seasonId) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     const [clubsRes, fixturesRes] = await Promise.all([
       supabase.from('clubs').select('*'),
@@ -51,6 +56,7 @@ export default function FixturesScreen() {
         .from('fixtures')
         .select('*')
         .eq('competition', 'league')
+        .eq('season_id', seasonId)
         .order('round', { ascending: true })
         .order('kickoff_at', { ascending: true }),
     ]);
@@ -60,7 +66,7 @@ export default function FixturesScreen() {
     else setError(null);
     setFixtures(fixturesRes.data ?? []);
     setLoading(false);
-  }, []);
+  }, [seasonId]);
 
   // Refetches on every focus, not just first mount -- same reasoning as
   // the other tabs (Expo Router keeps them mounted). Matters here too:
@@ -217,6 +223,7 @@ export default function FixturesScreen() {
       const { error: statsError } = await supabase.from('player_match_stats').insert(
         allStatRows.map((row) => ({
           fixture_id: row.fixture_id,
+          season_id: seasonId,
           player_id: row.playerId,
           club_id: row.club_id,
           minutes_played: row.minutesPlayed,
@@ -286,7 +293,16 @@ export default function FixturesScreen() {
         })
       );
 
-      await load();
+      // If this was the last round with any scheduled fixtures left, the
+      // season just finished -- hand off to the summary screen instead of
+      // just reloading in place. That screen is the ONLY place the
+      // continue/switch-club offer appears (see its own header comment).
+      const seasonNowOver = fixtures.every((f) => f.round === nextFixture.round || f.status !== 'scheduled');
+      if (seasonNowOver) {
+        router.push('/season-summary');
+      } else {
+        await load();
+      }
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Failed to play the round.';
       setPlayError(

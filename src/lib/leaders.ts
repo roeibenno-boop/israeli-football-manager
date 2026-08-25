@@ -27,6 +27,8 @@ export type LeaderRow = {
   redCards: number;
   saves: number;
   goalsConceded: number;
+  penaltiesScored: number;
+  keyPasses: number;
 };
 
 export function buildLeaderRows(stats: PlayerMatchStat[], players: Player[]): LeaderRow[] {
@@ -55,6 +57,8 @@ export function buildLeaderRows(stats: PlayerMatchStat[], players: Player[]): Le
         redCards: 0,
         saves: 0,
         goalsConceded: 0,
+        penaltiesScored: 0,
+        keyPasses: 0,
       };
       rowsByPlayer.set(stat.player_id, row);
     }
@@ -69,6 +73,8 @@ export function buildLeaderRows(stats: PlayerMatchStat[], players: Player[]): Le
     row.redCards += stat.red_cards;
     row.saves += stat.saves;
     row.goalsConceded += stat.goals_conceded;
+    row.penaltiesScored += stat.penalties_scored;
+    row.keyPasses += stat.key_passes;
     // avgRating accumulates a running sum here, divided below once every
     // match is folded in -- cheaper than storing every rating.
     row.avgRating += stat.match_rating ?? 0;

@@ -148,26 +148,31 @@ export function computeLineupRating(
   return computeClubRating(xi);
 }
 
-/**
- * Greedy auto-pick: for each slot, take the best remaining player (by
- * *effective* overall, so tired players naturally rotate out) whose actual
- * position exactly matches the slot's group; once a group runs dry, fill
- * remaining slots with whoever's left, preferring the smallest penalty
- * (closest group) and then highest effective overall. Not a true optimal
- * assignment (that's a much harder problem) but a reasonable, deterministic
- * "best available XI". Injured/suspended players are excluded outright.
- */
-export function autoPickBestXI(players: Player[], formationKey: FormationKey): SlotAssignment {
-  const slots = formations[formationKey];
-  const today = new Date().toISOString().slice(0, 10);
-  const eligible = players.filter((p) => {
-    const injured = p.injured_until != null && p.injured_until >= today;
-    const suspended = (p.suspended_matches ?? 0) > 0;
-    return !injured && !suspended;
-  });
+function isEligible(p: Player, today: string): boolean {
+  const injured = p.injured_until != null && p.injured_until >= today;
+  const suspended = (p.suspended_matches ?? 0) > 0;
+  return !injured && !suspended;
+}
 
+function eligiblePlayers(players: Player[]): Player[] {
+  const today = new Date().toISOString().slice(0, 10);
+  return players.filter((p) => isEligible(p, today));
+}
+
+/**
+ * Greedy assignment shared by autoPickBestXI/autoPickRotationXI: for each
+ * slot, take the best remaining player from `pool` (by *effective*
+ * overall, so tired players naturally rotate out of a plain best-XI pick)
+ * whose actual position exactly matches the slot's group; once a group
+ * runs dry, fill remaining slots with whoever's left, preferring the
+ * smallest penalty (closest group) and then highest effective overall.
+ * Not a true optimal assignment (that's a much harder problem) but a
+ * reasonable, deterministic "best available XI" from whatever pool it's
+ * given.
+ */
+function greedyAssign(pool: Player[], slots: FormationSlot[]): SlotAssignment {
   const effectiveRaw = (p: Player) => effectiveOverall(p.overall ?? 0, p.fatigue_level ?? 'fresh');
-  const available = [...eligible].sort((a, b) => effectiveRaw(b) - effectiveRaw(a));
+  const available = [...pool].sort((a, b) => effectiveRaw(b) - effectiveRaw(a));
   const used = new Set<string>();
   const assignment: SlotAssignment = {};
 
@@ -202,6 +207,70 @@ export function autoPickBestXI(players: Player[], formationKey: FormationKey): S
   }
 
   return assignment;
+}
+
+/** Injured/suspended players excluded outright; see greedyAssign for the assignment strategy itself. */
+export function autoPickBestXI(players: Player[], formationKey: FormationKey): SlotAssignment {
+  return greedyAssign(eligiblePlayers(players), formations[formationKey]);
+}
+
+export type AutoPickRotationResult = {
+  assignment: SlotAssignment;
+  /** Set when there weren't 11 non-tired eligible players to fill the XI -- some slots were filled with the freshest players still available (possibly 'tired') instead. Null when the constraint was met cleanly. */
+  warning: string | null;
+};
+
+/**
+ * Same idea as autoPickBestXI, but excludes 'tired' players from the pool
+ * entirely first -- for fixture congestion, where resting your most fatigued
+ * players matters more than fielding the single highest-rated XI. If fewer
+ * than 11 non-tired players are available (a threadbare or badly-fatigued
+ * squad), the remaining slots are filled with whoever's left, freshest
+ * (lowest fatigue_points) first -- tired or not -- rather than leaving the
+ * XI incomplete, and `warning` explains what happened.
+ */
+export function autoPickRotationXI(players: Player[], formationKey: FormationKey): AutoPickRotationResult {
+  const slots = formations[formationKey];
+  const eligible = eligiblePlayers(players);
+  const nonTired = eligible.filter((p) => (p.fatigue_level ?? 'fresh') !== 'tired');
+
+  const assignment = greedyAssign(nonTired, slots);
+  const used = new Set(Object.values(assignment).filter((id): id is string => id != null));
+  const shortfall = slots.length - used.size;
+
+  if (shortfall === 0) {
+    return { assignment, warning: null };
+  }
+
+  const freshestFirst = eligible
+    .filter((p) => !used.has(p.id))
+    .sort((a, b) => (a.fatigue_points ?? 0) - (b.fatigue_points ?? 0));
+
+  // Pass A: exact position match, freshest available first.
+  for (const slot of slots) {
+    if (assignment[slot.key]) continue;
+    const pick = freshestFirst.find((p) => !used.has(p.id) && p.position === slot.group);
+    if (pick) {
+      assignment[slot.key] = pick.id;
+      used.add(pick.id);
+    }
+  }
+  // Pass B: anything still empty, freshest remaining regardless of position.
+  for (const slot of slots) {
+    if (assignment[slot.key]) continue;
+    const pick = freshestFirst.find((p) => !used.has(p.id));
+    if (pick) {
+      assignment[slot.key] = pick.id;
+      used.add(pick.id);
+    } else {
+      assignment[slot.key] = null;
+    }
+  }
+
+  return {
+    assignment,
+    warning: `Not enough fresh/moderate players to fill the XI — ${shortfall} slot${shortfall === 1 ? '' : 's'} filled with the freshest players still available.`,
+  };
 }
 
 export function benchPlayers(players: Player[], assignment: SlotAssignment): Player[] {

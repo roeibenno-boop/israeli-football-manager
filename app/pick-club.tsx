@@ -1,4 +1,4 @@
-import { Redirect, router } from 'expo-router';
+import { Redirect, router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, FlatList, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
@@ -9,14 +9,30 @@ import { OverallBadge } from '@/components/OverallBadge';
 import { PressableScale } from '@/components/PressableScale';
 import { useAuth } from '@/lib/auth-context';
 import { estimateSquadRating, type RatedPlayer } from '@/lib/ratings';
+import { latestSeasonNumber, startNewSeason } from '@/lib/season-actions';
 import { supabase } from '@/lib/supabase';
 import { baseColors, radius, spacing, typography } from '@/theme';
 import { useProfile } from '@/lib/use-profile';
 import type { Club } from '@/types';
 
+/**
+ * `mode` distinguishes the three ways a manager can land here, since each
+ * needs different season-lifecycle handling (src/lib/season-actions.ts):
+ * - undefined (no prior seasons) -- first-ever club claim: season 1, no aging.
+ * - undefined (prior seasons exist) -- the pre-existing mid-season "Switch
+ *   Club" escape hatch (Squad tab): season_number+1, but NOT a real
+ *   rollover, so no aging either.
+ * - 'new-season' -- "Manage a different club" from the season summary
+ *   screen, after a season genuinely completed: season_number+1, WITH aging.
+ * - 'restart' -- Settings' "Restart Season": always season 1, no aging (a
+ *   restart is a do-over of the current season, not a season passing).
+ */
+type ClaimMode = 'new-season' | 'restart' | undefined;
+
 export default function PickClubScreen() {
   const { session, loading: sessionLoading } = useAuth();
   const { profile, loading: profileLoading, refresh } = useProfile(session);
+  const { mode } = useLocalSearchParams<{ mode?: ClaimMode }>();
 
   const [clubs, setClubs] = useState<Club[]>([]);
   const [ratingsByClub, setRatingsByClub] = useState<Record<string, number | null>>({});
@@ -78,19 +94,20 @@ export default function PickClubScreen() {
     setClaimingId(club.id);
     setError(null);
 
-    const { error: updateError } = await supabase
-      .from('profiles')
-      .update({ managed_club_id: club.id })
-      .eq('id', session.user.id);
-
-    if (updateError) {
+    try {
+      const seasonNumber = mode === 'restart' ? 1 : (await latestSeasonNumber(session.user.id)) + 1;
+      await startNewSeason({
+        profileId: session.user.id,
+        clubId: club.id,
+        seasonNumber,
+        age: mode === 'new-season',
+      });
+      await refresh();
+      router.replace('/');
+    } catch (e) {
       setClaimingId(null);
-      setError(updateError.message);
-      return;
+      setError(e instanceof Error ? e.message : 'Failed to claim this club.');
     }
-
-    await refresh();
-    router.replace('/');
   };
 
   const busy = sessionLoading || profileLoading || loadingClubs;
@@ -101,8 +118,9 @@ export default function PickClubScreen() {
         <Text style={styles.eyebrow}>Israeli Football Manager</Text>
         <Text style={styles.title}>Choose Your Club</Text>
         <Text style={styles.subtitle}>
-          Every club here is currently unmanaged — picking one is permanent for now, there's no
-          "switch club" screen yet.
+          {mode === 'restart'
+            ? 'Pick a club to start your new season with — a genuinely clean slate.'
+            : 'Every club here is currently unmanaged — pick one to take charge.'}
         </Text>
 
         {busy && <ActivityIndicator style={styles.spinner} color={baseColors.textSecondary} />}
@@ -168,6 +186,7 @@ function ClubCard({ club, overall, index, claiming, disabled, onPress }: ClubCar
         {claiming && (
           <View style={styles.claimingOverlay}>
             <ActivityIndicator color={baseColors.textPrimary} />
+            <Text style={styles.claimingText}>Setting up your season…</Text>
           </View>
         )}
       </PressableScale>
@@ -254,6 +273,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(11,11,13,0.75)',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  claimingText: {
+    ...typography.caption,
+    color: baseColors.textSecondary,
   },
 });
 
